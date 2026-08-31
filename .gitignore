@@ -10,3 +10,7 @@ test/.build/
 # 로컬 도구 캐시
 .vite/
 *.log
+
+goal-rush-deploy.zip
+goalrush-upload.zip
+zirAiAAo
