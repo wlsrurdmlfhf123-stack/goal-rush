@@ -12,6 +12,7 @@
 import type { Net } from "./net";
 import { PRESETS, defaultPresetFor } from "./characters";
 import type { JoinErrorReason } from "./protocol";
+import { wsBase } from "./ws-url";
 
 export type StartMode = "single" | "multi";
 
@@ -20,7 +21,7 @@ export interface MenuHooks {
   onStart(mode: StartMode): void;
 }
 
-const WS_URL = `ws://${location.hostname}:8080`;
+const WS_URL = wsBase();
 
 const el = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id) as T;
@@ -60,6 +61,16 @@ export function createMenu(net: Net, hooks: MenuHooks) {
    *                 이때만 "남이 이미 고른 캐릭터"를 실제로 볼 수 있다.
    */
   let pickThen: "single" | "multi" | "lobby" = "single";
+
+  /**
+   * URL 해시로 방에 바로 들어오기 - 친구에게 "링크 하나"만 보내면 되게.
+   *   https://…/#ABCD   또는   https://…/#room=ABCD
+   * 방을 만든 사람의 주소창에도 자동으로 #코드가 붙는다(welcome 처리 참고).
+   */
+  const linkCode = (location.hash.match(/[A-Za-z0-9]{4}/)?.[0] ?? "").toUpperCase();
+  const pendingJoin = /^[A-Z0-9]{4}$/.test(linkCode) ? linkCode : "";
+  /** 방에 들어와 있을 때 친구에게 보낼 전체 URL (포트/스킴은 지금 페이지 기준) */
+  const shareURL = () => (net.room ? `${location.origin}${location.pathname}#${net.room}` : "");
 
   function show(name: PanelName) {
     for (const [k, p] of Object.entries(panels)) p.hidden = k !== name;
@@ -158,11 +169,16 @@ export function createMenu(net: Net, hooks: MenuHooks) {
 
     // [게임 시작]은 방장만. 나머지는 안내만 본다.
     btnStart.hidden = !net.isHost;
-    lobbyHint.textContent = net.isHost
-      ? (ids.length < 2
-          ? "혼자서도 시작할 수 있다. 친구에게 위 코드를 알려줘라."
-          : "모두 모였으면 시작해라.")
-      : "방장이 시작하기를 기다리는 중…";
+    if (net.isHost && ids.length < 2) {
+      const url = shareURL();
+      lobbyHint.textContent = url
+        ? `친구에게 이 주소를 보내라 (누르면 복사): ${url}`
+        : "혼자서도 시작할 수 있다. 친구에게 위 코드를 알려줘라.";
+    } else {
+      lobbyHint.textContent = net.isHost
+        ? "모두 모였으면 시작해라."
+        : "방장이 시작하기를 기다리는 중…";
+    }
   }
 
   // ------------------------------------------------------------ 네트워크 반응
@@ -177,6 +193,8 @@ export function createMenu(net: Net, hooks: MenuHooks) {
         // 방에 들어가자마자 내가 고른 캐릭터를 등록한다.
         // (선택은 연결 전에 끝나 있으므로 서버는 아직 모른다)
         net.send({ type: "pick", preset: net.myPreset });
+        // 주소창에 #코드를 박아 둔다 - 방장이 주소를 그대로 복사해 보내면 끝.
+        if (net.room) { try { history.replaceState(null, "", `#${net.room}`); } catch { /* 무시 */ } }
         renderLobby();
         show("lobby");
         break;
@@ -233,6 +251,12 @@ export function createMenu(net: Net, hooks: MenuHooks) {
   el("btn-pick-ok").addEventListener("click", () => {
     if (pickThen === "single") startSingle();
     else if (pickThen === "lobby") { renderLobby(); show("lobby"); }
+    else if (pendingJoin) {
+      // 링크(#코드)로 들어왔다 - 모드 선택 건너뛰고 그 방으로 바로 참가.
+      show("join");
+      joinError.textContent = "들어가는 중…";
+      net.connect(`${WS_URL}/?room=${encodeURIComponent(pendingJoin)}`);
+    }
     else show("mode");
   });
   el("btn-pick-back").addEventListener("click", () => {
@@ -295,6 +319,18 @@ export function createMenu(net: Net, hooks: MenuHooks) {
     const code = net.room;
     if (code) void navigator.clipboard?.writeText(code);
   });
+  lobbyHint.addEventListener("click", () => {
+    // 안내줄에 뜬 공유 URL을 눌러서 복사
+    const url = shareURL();
+    if (url && net.isHost) void navigator.clipboard?.writeText(url);
+  });
 
-  show("title");
+  // 링크(#코드)로 들어왔으면 타이틀을 건너뛰고 바로 캐릭터 선택 -> 자동 참가.
+  if (pendingJoin) {
+    pickThen = "multi";
+    renderPicks();
+    show("pick");
+  } else {
+    show("title");
+  }
 }

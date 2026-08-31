@@ -233,6 +233,105 @@ export const OB = {
   knockUp: 26,
   /** 넘어져 있는 시간 (초). 거대 공보다 짧게 - 빈도가 훨씬 높기 때문이다 */
   knockdownTime: 1.15,
+
+  // ---- 움직이는 플랫폼 (platform)
+  //
+  // sweeper 와 같은 KINEMATIC + velocity 방식이다 (위치를 직접 대입하면 접촉이
+  // 파고들었다 튄다).
+  //
+  // [실측: 공은 온전히 실려 가고, 사람은 미끄러진다]
+  // 브라우저에서 스테이지 3 발판에 직접 올라타 재보니, 2.6초 동안 발판은
+  // 6.32m 갔는데 사람은 2.39m 밖에 못 갔다 (상대 미끄러짐 약 3.9m). 공은
+  // 헤드리스에서 발판을 따라 그대로 간다. 차이는 ragdoll.ts control() 의
+  // 속도 서보다 - 입력이 없으면 **월드 기준 속도 0** 을 목표로 최대 49 m/s^2
+  // 제동을 걸어서, 마찰로 얻은 발판 속도를 그 자리에서 지운다. 컨베이어의
+  // convGrip 주석과 같은 원인이고, 힘을 키우는 방식으로는 해결되지 않는다.
+  // 제대로 태우려면 "발판 속도를 이동 입력에 더해 주는" 처리가 필요하다
+  // (dashDir/rushDir 과 같은 입력 경로). 지금은 그렇게 하지 않았다 -
+  // 발판 위에 서서 잠깐 건너는 용도로는 되지만, 끝까지 실려 가지는 않는다.
+  // 크기/축/왕복폭/속도는 맵이 params 로 준다 - 여기 값은 기본값이다.
+  platH: 0.4,
+  platW: 3.2,
+  platD: 3.0,
+  /**
+   * 발판 중심 높이의 기본값.
+   *
+   * [코스 바닥 윗면이 y=0 이다] course.ts 의 deck 은 두께 DECK_H(1.2)를
+   * 중심 -0.6 에 두므로 **걷는 면이 정확히 y=0** 이다. 발판 윗면도 거기
+   * 맞춰야 낭떠러지를 건널 때 턱 없이 올라탈 수 있다 - 중심을 platH/2 만큼
+   * 내려 윗면을 0 에 맞춘다. 띄운 발판이 필요하면 params.y 로 올린다.
+   */
+  platY: -0.2,
+  platSpeed: 2.4,
+  /** 양 끝에서 멈춰 서 있는 시간 (초) */
+  platHold: 0.6,
+  /**
+   * 발을 뗀 뒤에도 승객으로 볼 시간 (초).
+   *
+   * [왜 필요한가] 서 있는 래그돌은 두 발이 번갈아 닿았다 떨어진다. 접촉이
+   * 있는 프레임에만 태우면 중간중간 빠져서 실측 77% 밖에 못 따라갔다.
+   * 발이 잠깐 뜬 것은 "내렸다"가 아니므로 짧게 붙잡아 둔다. 실제로 발판을
+   * 벗어나면 접촉이 계속 없으므로 이 시간 뒤에 자연히 풀린다.
+   */
+  platRiderGrace: 0.25,
+
+  // ---- 컨베이어 (conveyor)
+  //
+  // [왜 마찰이 아니라 직접 미는가] 벨트는 제자리에 있는 몸체다. cannon 의
+  // 마찰은 두 바디의 상대 속도로 계산되므로, 안 움직이는 벨트는 마찰만으로는
+  // 위에 있는 것을 못 민다. 목표 속도까지만 당기므로 반대로 달리면 이긴다.
+  convW: 8.0,
+  convH: 0.3,
+  convD: 8.0,
+  convY: 0.15,
+  convSpeed: 3.4,
+  /**
+   * 목표 속도까지 끌어당기는 가속 (m/s^2).
+   *
+   * [실측] 9 -> 30 으로 3.3배 올려도 **서 있는 사람**은 2초에 0.49 -> 0.71m
+   * 밖에 안 밀렸다. control() 의 속도 서보가 최대 49 m/s^2 로 제동을 걸기
+   * 때문이다(HANDOFF 5절과 같은 현상). 힘을 키우는 건 답이 아니므로 9 로 둔다.
+   * 벨트는 **공을 실어 나르는 장치**이고 사람에게는 "발밑이 흐르는" 정도다.
+   */
+  convGrip: 9.0,
+  /** 벨트 윗면에서 이 높이 안에 있어야 올라탄 것으로 본다 */
+  convRideH: 1.5,
+
+  // ---- 바람 영역 (wind)
+  //
+  // 충돌하지 않는 구역이다 (collisionResponse=false). 사람은 control() 의
+  // 속도 서보가 상당 부분 먹어서 걸을 수 있고, 공은 서보가 없어 훨씬 잘
+  // 밀린다 = "공만 날아간다"가 된다.
+  windW: 14.0,
+  windH: 4.0,
+  windD: 10.0,
+  /** 사람에게 거는 가속 (m/s^2). params.force 가 있으면 그걸 쓴다 */
+  windAccel: 6.5,
+  /** 공에는 몇 배로 거는가 */
+  windBallMul: 2.6,
+
+  // ---- 공을 넣으면 켜지는 장치 (ballsocket)
+  //
+  // 공이 링 안에 "머물러 있어야" 켜진다. 스쳐 지나가는 것으로는 안 켜지게
+  // 속도 상한을 두고, 튕겨 나갔다 들어오는 깜빡임은 유예로 흡수한다.
+  sockR: 1.35,
+  sockY: 0.35,
+  sockHold: 0.35,
+  sockMaxSpeed: 3.2,
+  sockGrace: 0.5,
+
+  // ---- 레버 (lever)
+  //
+  // 문에서 **떨어뜨려 놓을 수 있는** 스위치다. buttongate 는 발판과 문이
+  // 한 몸이라 "코스 양 끝의 레버"를 표현할 수 없어서 따로 둔다.
+  // 막지 않는다 (collisionResponse=false) - 밟고 지나가는 바닥 판이다.
+  leverW: 2.2,
+  leverD: 2.2,
+  leverY: 0.06,
+  /** 발판 위로 이 높이까지를 "밟고 있다"로 본다 */
+  leverMaxY: 1.5,
+  /** 발에서 떨어져도 이 시간 동안은 켜져 있다 (깜빡임 방지) */
+  leverGrace: 0.35,
 };
 
 export type ObstacleKind =
@@ -243,7 +342,13 @@ export type ObstacleKind =
   | "popup"     // 바닥에서 솟았다 내려가는 벽 - 내려간 사이에 통과
   | "shutter"   // 가운데 통로가 열렸다 닫힌다 - 가운데냐 옆이냐를 고른다
   | "coopgate"    // 협동 게이트 - 패스를 성공해야 열린다 (멀티 전용)
-  | "buttongate"; // 버튼 문 - 양쪽 발판을 둘이 동시에 밟고 있어야 열린다 (멀티 전용)
+  | "buttongate" // 버튼 문 - 양쪽 발판을 둘이 동시에 밟고 있어야 열린다 (멀티 전용)
+  | "platform"   // 움직이는 플랫폼 - 위에 탄 것을 싣고 축을 따라 왕복
+  | "conveyor"   // 컨베이어 - 위에 올라간 것을 한쪽으로 실어 나른다
+  | "wind"       // 바람 영역 - 안에 있는 동안 한 방향으로 민다 (충돌 없음)
+  | "ballsocket" // 공 넣는 장치 - 공이 링 안에 머물면 link 신호를 켠다
+  | "lever"      // 레버 - 밟고 있는 동안(또는 한 번 밟으면) link 신호를 켠다
+  | "holdgate";  // 신호 문 - 같은 link 의 스위치가 **전부** 켜져 있어야 열린다
 
 /** 맵이 선언하는 장애물 */
 export interface ObstacleSpec {
@@ -255,6 +360,28 @@ export interface ObstacleSpec {
   arg: number;
   /** 시작 위상 (초). 서로 다르게 줘야 한꺼번에 안 움직인다 */
   phase: number;
+  /**
+   * 신호 채널 (선택). 트리거와 문을 잇는 유일한 배선이다.
+   *
+   *   lever / ballsocket / buttongate ... 조건을 만족하는 동안 이 채널을 켠다
+   *   coopgate                        ... 채널이 **하나라도** 켜지면 열린다
+   *   holdgate                        ... 채널의 트리거가 **전부** 켜져야 열린다
+   *
+   * link 가 없으면 예전 그대로다 - z 위치로 여는 openGate() 경로.
+   * (맵은 문자열 이름으로 묶고, maps/course.ts 가 번호로 바꿔 준다)
+   */
+  link?: number;
+  /** 좌우 위치 (기본 0 = 레인 중앙). 두 갈래 길에 놓는 기믹이 쓴다 */
+  x?: number;
+  /**
+   * 값이 둘 이상 필요한 기믹의 파라미터 (maps/gimmicks.ts 의 어휘).
+   *   platform : axis(0=x,1=z) span speed w len
+   *   conveyor : dirZ speed w len
+   *   wind     : dirX dirZ force w len
+   *   lever    : hold(1=밟는 동안만, 0=한 번 켜면 유지) w len
+   *   holdgate : w h
+   */
+  params?: Record<string, number>;
 }
 
 interface Station {
@@ -278,6 +405,27 @@ interface Station {
   forceOpen: boolean;
   /** coopgate 전용 - 열렸는가 (바깥에서 openGate()로 연다) */
   opened: boolean;
+  /** 이 station 이 지금 link 채널을 켜고 있는가 (트리거 전용) */
+  signalOn: boolean;
+  /** ballsocket - 공이 머문 시간 / 나간 뒤 남은 유예 (초) */
+  sockT: number;
+  sockGraceT: number;
+  /** lever - 발에서 떨어진 뒤 남은 유예 (초) / 한 번 켜면 유지되는가 */
+  leverGraceT: number;
+  leverLatched: boolean;
+  /** platform - 진행 방향(+1/-1), 양 끝 정지 잔여시간, 축/왕복반폭/속도/중심x */
+  dir: number;
+  holdT: number;
+  axis: number;
+  half: number;
+  speed: number;
+  px: number;
+  /** 직전 스텝의 발판 위치. 이번 스텝 이동량(= 태워 옮길 거리)을 재는 데 쓴다 */
+  prevX: number;
+  prevZ: number;
+  /** 이 발판의 승객과 남은 유예 시간 (초). 발이 잠깐 떠도 계속 태운다 */
+  riders: Map<Ragdoll, number>;
+  py: number;
 }
 
 /** 결정론적 난수 (hazards.ts와 같은 방식) */
@@ -345,6 +493,19 @@ export function createObstacles(world: World, laneHalf: number) {
         rolling: false, x: 0, cycle: 0,
         homeX: spec.arg * (laneHalf + OB.pistonW * 0.5),
         opened: false, forceOpen: false,
+        signalOn: false, sockT: 0, sockGraceT: 0,
+        leverGraceT: 0, leverLatched: false,
+        // platform 파라미터는 맵이 준 params 에서 한 번만 읽어 둔다
+        dir: 1, holdT: 0,
+        axis: (spec.params?.axis ?? 0) >= 0.5 ? 1 : 0,
+        half: spec.params?.span !== undefined
+          ? Math.max(0.5, spec.params.span * 0.5)
+          : Math.max(0.5, spec.arg),
+        speed: spec.params?.speed ?? OB.platSpeed,
+        px: spec.x ?? 0,
+        py: spec.params?.y ?? OB.platY,
+        prevX: 0, prevZ: 0,
+        riders: new Map<Ragdoll, number>(),
       });
     }
     park();
@@ -358,6 +519,13 @@ export function createObstacles(world: World, laneHalf: number) {
       s.rolling = false;
       s.opened = false;
       s.forceOpen = false;
+      s.signalOn = false;
+      s.sockT = 0;
+      s.sockGraceT = 0;
+      s.leverGraceT = 0;
+      s.leverLatched = false;
+      s.holdT = 0;
+      s.riders.clear();
       const b = s.body;
       b.velocity.setZero();
       b.angularVelocity.setZero();
@@ -387,6 +555,33 @@ export function createObstacles(world: World, laneHalf: number) {
           // 좌우 셔터는 바디 하나로 만든다 (arg가 -1이면 왼쪽, +1이면 오른쪽)
           b.position.set(s.spec.arg * (laneHalf + 1), OB.shutterH * 0.5, s.spec.z);
           break;
+        case "platform": {
+          // 왕복 구간의 한쪽 끝에서 출발한다. phase 로 시작 위치를 어긋나게 둔다.
+          const st = platformPhase(s, s.spec.phase);
+          s.dir = st.dir; s.holdT = st.holdT;
+          if (s.axis === 0) b.position.set(s.px + st.off, s.py, s.spec.z);
+          else b.position.set(s.px, s.py, s.spec.z + st.off);
+          // 첫 스텝의 이동량이 0이 되도록 놓인 자리를 그대로 기억해 둔다
+          s.prevX = b.position.x;
+          s.prevZ = b.position.z;
+          break;
+        }
+        case "conveyor":
+          b.position.set(s.px, OB.convY, s.spec.z);
+          break;
+        case "wind":
+          b.position.set(s.px, OB.windH * 0.5, s.spec.z);
+          break;
+        case "ballsocket":
+          b.position.set(s.px, OB.sockY, s.spec.z);
+          break;
+        case "lever":
+          b.position.set(s.px, OB.leverY, s.spec.z);
+          break;
+        case "holdgate":
+          // 신호 문도 닫힌 자리에서 시작한다 (coopgate 와 같은 몸체)
+          b.position.set(s.px, OB.gateH * 0.5, s.spec.z);
+          break;
         case "coopgate":
         case "buttongate":
           // 닫힌 자리에서 시작한다. 싱글이면 rebuild 직후 openGate로 열린다.
@@ -399,9 +594,90 @@ export function createObstacles(world: World, laneHalf: number) {
 
   /**
    * host 전용. 한 스텝 진행한다.
+   * @param ball 있으면 컨베이어/바람/공 소켓이 공을 함께 다룬다 (없으면 사람만)
    * @returns 이번 스텝에 거대 공에 맞은 사람들
    */
-  function update(dt: number, players: Ragdoll[]): ObstacleHit[] {
+  /**
+   * 왕복 발판이 위상 t 초 시점에 어디에 있는가.
+   *
+   * 한 바퀴 = (끝에서 끝으로 이동) + (정지) + (되돌아오기) + (정지).
+   * 스테이지 3처럼 발판 둘을 반대 위상으로 둘 때 이게 있어야 "항상 한쪽만
+   * 붙어 있다"가 성립한다.
+   */
+  /**
+   * 발판 위에 실제로 올라타 있는 사람들.
+   *
+   * [왜 좌표 범위가 아니라 접촉으로 보는가] 발판 윗면은 코스 바닥과 같은
+   * 높이(y=0)라, 좌표만으로는 "발판 위"와 "발판 옆 바닥 위"를 구분할 수 없다.
+   * 특히 발판이 다리 입구에 물려 있는 동안에는 두 영역이 겹친다. 물리 엔진이
+   * 이미 계산해 둔 접촉을 그대로 읽으면 실제로 발을 딛고 있는 경우만 잡힌다.
+   *
+   * physics.contacts 는 직전 step 의 결과다. 이동량도 같은 직전 step 에서
+   * 재므로 둘의 시점이 어긋나지 않는다.
+   */
+  function ridersOf(plat: CANNON.Body, players: Ragdoll[]): Ragdoll[] {
+    const touching = new Set<CANNON.Body>();
+    for (const c of world.physics.contacts) {
+      if (c.bi === plat) touching.add(c.bj);
+      else if (c.bj === plat) touching.add(c.bi);
+    }
+    if (touching.size === 0) return [];
+    const out: Ragdoll[] = [];
+    for (const rag of players) {
+      // 옆에서 부딪힌 것과 위에 올라선 것을 가른다 - 위에 있어야 태운다.
+      if (rag.pelvis.position.y < plat.position.y + 0.2) continue;
+      for (const bd of rag.bodies) {
+        if (touching.has(bd)) { out.push(rag); break; }
+      }
+    }
+    return out;
+  }
+  function platformPhase(s: Station, t: number): { off: number; dir: number; holdT: number } {
+    const travel = (2 * s.half) / Math.max(0.01, s.speed);   // 편도 시간
+    const hold = OB.platHold;
+    const period = 2 * travel + 2 * hold;
+    let u = period > 0 ? t % period : 0;
+    if (u < 0) u += period;
+    if (u < travel) return { off: -s.half + s.speed * u, dir: 1, holdT: 0 };
+    u -= travel;
+    if (u < hold) return { off: s.half, dir: -1, holdT: hold - u };
+    u -= hold;
+    if (u < travel) return { off: s.half - s.speed * u, dir: -1, holdT: 0 };
+    u -= travel;
+    return { off: -s.half, dir: 1, holdT: hold - u };
+  }
+
+  /** link 채널을 켜고 있는 트리거가 하나라도 있는가 */
+  function signalActive(ch: number): boolean {
+    for (const s of stations) if (s.signalOn && s.spec.link === ch) return true;
+    return false;
+  }
+
+  /**
+   * 그 채널의 트리거가 **전부** 켜져 있는가 (holdgate 용).
+   * 트리거가 하나도 없으면 false - 아무도 안 누른 문이 열려 있으면 안 된다.
+   */
+  function signalAll(ch: number): boolean {
+    let n = 0;
+    for (const s of stations) {
+      if (s.spec.link !== ch || !isTrigger(s)) continue;
+      n++;
+      if (!s.signalOn) return false;
+    }
+    return n > 0;
+  }
+
+  /** 신호를 낼 수 있는 kind 인가 (문은 신호를 읽기만 한다) */
+  const isTrigger = (s: Station) =>
+    s.spec.kind === "lever" || s.spec.kind === "ballsocket" || s.spec.kind === "buttongate";
+
+  /** 지금 켜져 있는 신호 채널들 (HUD/검증용) */
+  function signals(): number[] {
+    const out = new Set<number>();
+    for (const s of stations) if (s.signalOn && s.spec.link !== undefined) out.add(s.spec.link);
+    return [...out].sort((a, b) => a - b);
+  }
+  function update(dt: number, players: Ragdoll[], ball?: CANNON.Body): ObstacleHit[] {
     const hits: ObstacleHit[] = [];
 
     for (const [rag, t] of hitCooldown) {
@@ -538,6 +814,8 @@ export function createObstacles(world: World, laneHalf: number) {
               }
             }
           }
+          // 버튼 문도 신호원이다 - link 를 주면 멀리 있는 문을 함께 연다.
+          s.signalOn = s.opened;
           const targetY = s.opened ? -OB.gateH * 0.5 - OB.gateSink : OB.gateH * 0.5;
           const dy = targetY - b.position.y;
           b.velocity.set(0, Math.abs(dy) < 0.05 ? 0 : Math.sign(dy) * OB.gateSpeed, 0);
@@ -548,11 +826,218 @@ export function createObstacles(world: World, laneHalf: number) {
 
         case "coopgate": {
           // 위상이 아니라 opened 플래그로만 움직인다.
+          // link 가 걸려 있으면 신호가 곧 개폐다 (레버/공소켓이 연 문).
+          // link 가 없으면 예전 그대로 openGate() 가 세운 opened 를 쓴다.
+          if (s.spec.link !== undefined) {
+            s.opened = s.forceOpen || signalActive(s.spec.link);
+            // [지나가면 걸어 잠근다] buttongate 와 같은 이유다. 레버를 눌러주는
+            // 쪽도 결국 건너야 하는데, 레버에서 발을 떼면 문이 닫혀 버린다.
+            // 누군가 문을 넘어간 뒤에는 계속 열어 둔다.
+            if (s.opened) {
+              for (const rag of players) {
+                if (rag.pelvis.position.z < s.spec.z - OB.gateD) { s.forceOpen = true; break; }
+              }
+            }
+          }
           const targetY = s.opened ? -OB.gateH * 0.5 - OB.gateSink : OB.gateH * 0.5;
           const dy = targetY - b.position.y;
           b.velocity.set(0, Math.abs(dy) < 0.05 ? 0 : Math.sign(dy) * OB.gateSpeed, 0);
           b.position.x = 0;
           b.position.z = s.spec.z;
+          break;
+        }
+
+        case "holdgate": {
+          // 같은 link 의 스위치가 **전부** 켜져 있는 동안만 열린다.
+          // coopgate(하나라도 켜지면 열림)와 다른 점이 이 한 줄이다.
+          // [2인 플레이 주의] 레버가 둘이고 둘 다 "밟고 있는 동안만"(hold:1)이면,
+          // 사람이 딱 둘일 때 둘 다 레버에 묶여 아무도 문을 못 지난다. buttongate 가
+          // "발판 하나만 밟혀도 열림"으로 바뀐 것과 같은 이유다. 2인 코스에서는
+          //   · 레버를 hold:0(한 번 밟으면 유지)으로 두거나
+          //   · 문을 coopgate(link) 로 바꿔 "하나만 켜져도 열림"으로 쓴다.
+          // 레버가 둘 이상이면 싱글에서는 openGate() 가 자동으로 열어 준다.
+          s.opened = s.forceOpen || (s.spec.link !== undefined && signalAll(s.spec.link));
+          if (s.opened) {
+            for (const rag of players) {
+              if (rag.pelvis.position.z < s.spec.z - OB.gateD) { s.forceOpen = true; break; }
+            }
+          }
+          const targetY = s.opened ? -OB.gateH * 0.5 - OB.gateSink : OB.gateH * 0.5;
+          const dy = targetY - b.position.y;
+          b.velocity.set(0, Math.abs(dy) < 0.05 ? 0 : Math.sign(dy) * OB.gateSpeed, 0);
+          b.position.x = s.px;
+          b.position.z = s.spec.z;
+          break;
+        }
+
+        case "lever": {
+          // 밟고 있는 사람이 있으면 켜진다. 막지 않는 바닥 판이라 판정만 한다.
+          b.position.set(s.px, OB.leverY, s.spec.z);
+          b.velocity.setZero();
+          const pw = (s.spec.params?.w ?? OB.leverW) * 0.5;
+          const pl = (s.spec.params?.len ?? OB.leverD) * 0.5;
+          let stepped = false;
+          for (const rag of players) {
+            const q = rag.pelvis.position;
+            if (q.y > OB.leverMaxY) continue;
+            if (Math.abs(q.x - s.px) > pw) continue;
+            if (Math.abs(q.z - s.spec.z) > pl) continue;
+            stepped = true;
+            break;
+          }
+          // hold=0 이면 한 번 밟으면 계속 켜져 있다 (park 에서만 풀린다).
+          const momentary = (s.spec.params?.hold ?? 1) >= 0.5;
+          if (stepped) { s.leverLatched = true; s.leverGraceT = OB.leverGrace; }
+          else s.leverGraceT = Math.max(0, s.leverGraceT - dt);
+          s.signalOn = momentary ? (stepped || s.leverGraceT > 0) : s.leverLatched;
+          break;
+        }
+
+        case "platform": {
+          // ---- 승객 태우기
+          //
+          // [왜 힘/속도가 아니라 위치로 옮기는가] ragdoll.ts control() 의 속도
+          // 서보는 **월드 기준** 목표 속도(입력이 없으면 0)로 최대 49 m/s^2 의
+          // 제동을 건다. 그래서 마찰이든 충격량이든 발판이 준 속도는 그 자리에서
+          // 지워진다 (실측: 발판 6.32m 가는 동안 사람은 2.39m). 속도를 건드리는
+          // 방법은 전부 같은 벽에 막히므로, 서보가 보지 않는 **위치**를 옮긴다.
+          //
+          // 15개 바디를 **같은 양**만큼 통째로 옮기므로 관절의 상대 자세가
+          // 전혀 변하지 않는다 = 제약이 늘어나지 않는다. 속도는 손대지 않아서
+          // 발판에서 내려도 관성이 갑자기 붙지 않고, 그 위에서 걷는 것도 그대로다
+          // (control() 은 평소처럼 자기 일을 한다).
+          //
+          // host 전용 경로다 (update 자체가 host 에서만 돈다). 비-host 는 늘
+          // 그랬듯 스냅샷으로 결과만 받는다 - 클라이언트 보정이 아니다.
+          {
+            const mx = b.position.x - s.prevX;
+            const mz = b.position.z - s.prevZ;
+            // 접촉이 있는 사람은 유예를 채우고, 없는 사람은 깎는다.
+            for (const rag of ridersOf(b, players)) s.riders.set(rag, OB.platRiderGrace);
+            for (const [rag, t] of s.riders) {
+              const nt = t - dt;
+              if (nt <= 0) s.riders.delete(rag);
+              else s.riders.set(rag, nt);
+            }
+            if (mx !== 0 || mz !== 0) {
+              // [모자란 만큼만 채운다] 발판과 사람 사이에는 마찰도 살아 있어서,
+              // 발판 이동량을 통째로 더하면 마찰이 이미 옮겨 준 만큼이 겹쳐
+              // 사람이 발판보다 빨리 나간다 (실측 130% - 앞으로 미끄러져 떨어진다).
+              // 그래서 직전 스텝에 마찰로 따라간 양(v*dt)을 빼고 **부족분만** 옮긴다.
+              // 마찰이 다 해줬으면 0, 하나도 못 했으면 전부 = 항상 발판과 같은 양.
+              //
+              // 0..이동량으로 자르는 것이 핵심이다. 사람이 발판 위에서 스스로
+              // 걸으면 v*dt 가 이동량을 넘는데, 그때 음수를 그대로 쓰면 걸음을
+              // 뒤로 잡아당겨 취소해 버린다. 잘라내면 "발판 속도까지는 보장하고,
+              // 그 위에서 걷는 건 사람 몫"이 된다.
+              const clamp = (v: number, lim: number) =>
+                lim >= 0 ? Math.max(0, Math.min(v, lim)) : Math.min(0, Math.max(v, lim));
+              for (const rag of s.riders.keys()) {
+                const cx = clamp(mx - rag.pelvis.velocity.x * dt, mx);
+                const cz = clamp(mz - rag.pelvis.velocity.z * dt, mz);
+                if (cx === 0 && cz === 0) continue;
+                for (const bd of rag.bodies) {
+                  bd.position.x += cx;
+                  bd.position.z += cz;
+                }
+              }
+            }
+            s.prevX = b.position.x;
+            s.prevZ = b.position.z;
+          }
+          // 좌우/앞뒤 왕복. KINEMATIC + velocity 라서 위에 탄 사람과 공이
+          // 마찰로 같이 실려 간다.
+          const sp = s.speed;
+          if (s.holdT > 0) {
+            s.holdT = Math.max(0, s.holdT - dt);
+            b.velocity.setZero();
+          } else if (s.axis === 0) {
+            b.velocity.set(s.dir * sp, 0, 0);
+            if (s.dir > 0 && b.position.x >= s.px + s.half) { b.position.x = s.px + s.half; s.dir = -1; s.holdT = OB.platHold; }
+            else if (s.dir < 0 && b.position.x <= s.px - s.half) { b.position.x = s.px - s.half; s.dir = 1; s.holdT = OB.platHold; }
+          } else {
+            b.velocity.set(0, 0, s.dir * sp);
+            if (s.dir > 0 && b.position.z >= s.spec.z + s.half) { b.position.z = s.spec.z + s.half; s.dir = -1; s.holdT = OB.platHold; }
+            else if (s.dir < 0 && b.position.z <= s.spec.z - s.half) { b.position.z = s.spec.z - s.half; s.dir = 1; s.holdT = OB.platHold; }
+          }
+          // 진행 축이 아닌 쪽은 고정한다 (부딪혀 밀려나지 않게)
+          if (s.axis === 0) b.position.z = s.spec.z; else b.position.x = s.px;
+          b.position.y = s.py;
+          break;
+        }
+
+        case "conveyor": {
+          // 벨트는 제자리에 있다. 위에 올라온 것을 목표 속도까지만 당긴다.
+          b.position.set(s.px, OB.convY, s.spec.z);
+          b.velocity.setZero();
+          const cp = s.spec.params ?? {};
+          const cHalfW = (cp.w ?? OB.convW) * 0.5;
+          const cHalfL = (cp.len ?? OB.convD) * 0.5;
+          const cSpeed = cp.speed ?? OB.convSpeed;
+          const target = (cp.dirZ ?? 1) >= 0 ? cSpeed : -cSpeed;
+          const topY = OB.convY + OB.convH * 0.5;
+          const onBelt = (x: number, y: number, z: number) =>
+            Math.abs(x - s.px) <= cHalfW && Math.abs(z - s.spec.z) <= cHalfL &&
+            y >= topY - 0.35 && y <= topY + OB.convRideH;
+          const pull = (vz: number) => {
+            const dv = target - vz;
+            return Math.sign(dv) * Math.min(Math.abs(dv), OB.convGrip * dt);
+          };
+          for (const rag of players) {
+            const q = rag.pelvis.position;
+            if (!onBelt(q.x, q.y, q.z)) continue;
+            rag.pelvis.applyImpulse(new CANNON.Vec3(0, 0, pull(rag.pelvis.velocity.z) * rag.pelvis.mass));
+          }
+          if (ball && onBelt(ball.position.x, ball.position.y, ball.position.z)) {
+            ball.wakeUp();
+            ball.applyImpulse(new CANNON.Vec3(0, 0, pull(ball.velocity.z) * ball.mass));
+          }
+          break;
+        }
+
+        case "wind": {
+          // 막지 않는다. 안에 있는 동안 dir 방향으로 계속 민다.
+          b.position.set(s.px, OB.windH * 0.5, s.spec.z);
+          b.velocity.setZero();
+          const wp = s.spec.params ?? {};
+          const wHalfW = (wp.w ?? OB.windW) * 0.5;
+          const wHalfL = (wp.len ?? OB.windD) * 0.5;
+          // force 는 사람에게 거는 가속이다. dirX 가 없으면 arg 를 X 방향으로 쓴다.
+          const acc = wp.force ?? OB.windAccel;
+          const wdx = (wp.dirX ?? s.spec.arg) * acc;
+          const wdz = (wp.dirZ ?? 0) * acc;
+          const inZone = (x: number, y: number, z: number) =>
+            Math.abs(x - s.px) <= wHalfW && Math.abs(z - s.spec.z) <= wHalfL &&
+            y >= -0.2 && y <= OB.windH;
+          for (const rag of players) {
+            const q = rag.pelvis.position;
+            if (!inZone(q.x, q.y, q.z)) continue;
+            rag.pelvis.applyImpulse(new CANNON.Vec3(wdx * dt * rag.pelvis.mass, 0, wdz * dt * rag.pelvis.mass));
+          }
+          if (ball && inZone(ball.position.x, ball.position.y, ball.position.z)) {
+            ball.wakeUp();
+            const wm = ball.mass * OB.windBallMul * dt;
+            ball.applyImpulse(new CANNON.Vec3(wdx * wm, 0, wdz * wm));
+          }
+          break;
+        }
+
+        case "ballsocket": {
+          // 공이 링 안에 머물러 있어야 켜진다.
+          b.position.set(s.px, OB.sockY, s.spec.z);
+          b.velocity.setZero();
+          let resting = false;
+          if (ball) {
+            const sdx = ball.position.x - s.px;
+            const sdz = ball.position.z - s.spec.z;
+            const sspeed = Math.hypot(ball.velocity.x, ball.velocity.z);
+            resting = Math.hypot(sdx, sdz) <= OB.sockR
+              && Math.abs(ball.position.y - OB.sockY) < 1.2
+              && sspeed <= OB.sockMaxSpeed;
+          }
+          if (resting) { s.sockT += dt; s.sockGraceT = OB.sockGrace; }
+          else { s.sockT = 0; s.sockGraceT = Math.max(0, s.sockGraceT - dt); }
+          s.signalOn = s.sockT >= OB.sockHold || (s.signalOn && s.sockGraceT > 0);
           break;
         }
 
@@ -689,10 +1174,31 @@ export function createObstacles(world: World, laneHalf: number) {
    * @returns 실제로 연 게이트의 z (없으면 null)
    */
   /** 패스로 열리는 관문인가 (버튼 문은 패스가 아니라 발판으로 연다) */
-  const isPassGate = (s: Station) => s.spec.kind === "coopgate";
-  /** 사람이 둘 이상 있어야 열 수 있는 관문 전부 */
-  const isCoopGate = (s: Station) =>
-    s.spec.kind === "coopgate" || s.spec.kind === "buttongate";
+  // link 가 걸린 문은 자기 트리거(레버/공 소켓)로 열 수 있으므로 싱글
+  // 자동 개방 대상이 아니다. 순수 패스 게이트만 자동으로 열어 준다.
+  const isPassGate = (s: Station) => s.spec.kind === "coopgate" && s.spec.link === undefined;
+  /** 그 채널에 신호를 낼 수 있는 트리거가 몇 개인가 */
+  function triggerCount(ch?: number): number {
+    if (ch === undefined) return 0;
+    let n = 0;
+    for (const s of stations) if (s.spec.link === ch && isTrigger(s)) n++;
+    return n;
+  }
+
+  /**
+   * 사람이 둘 이상 있어야 열 수 있는 관문인가 (싱글에서 자동으로 열어 줄 대상).
+   *
+   * [혼자서 풀 수 있는 문은 열어 주지 않는다] 공 소켓 하나로 열리는 문은
+   * 싱글에서도 공만 굴려 넣으면 되므로 공짜로 열면 퍼즐이 사라진다.
+   * 반대로 레버가 둘 이상 달린 holdgate 는 혼자서는 절대 못 여니 열어 준다
+   * (안 그러면 싱글에서 그 자리에서 진행이 막힌다).
+   */
+  const isCoopGate = (s: Station) => {
+    if (s.spec.kind === "buttongate") return true;
+    if (s.spec.kind === "coopgate") return s.spec.link === undefined;   // 패스 게이트
+    if (s.spec.kind === "holdgate") return triggerCount(s.spec.link) >= 2;
+    return false;
+  };
 
   /**
    * 관문을 연다.
@@ -751,7 +1257,7 @@ export function createObstacles(world: World, laneHalf: number) {
     return false;
   }
 
-  return { rebuild, park, update, rollers, forget, openGate, closedGates, needsSoloOpen,
+  return { rebuild, park, update, rollers, signals, signalActive, signalAll, forget, openGate, closedGates, needsSoloOpen,
     buttonGates, onPad,
     get stations() { return stations; } };
 }

@@ -5,17 +5,25 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:tunnel": "vite --mode tunnel",
     "server": "node server/server.js",
+    "tunnel": "node scripts/tunnel.mjs",
+    "share": "node scripts/share.mjs",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
-    "test": "npm run test:net && npm run test:room && npm run test:ragdoll && npm run test:swap && npm run test:explosion && npm run test:game && npm run test:ball",
+    "test": "npm run test:net && npm run test:room && npm run test:ws && npm run test:ragdoll && npm run test:swap && npm run test:explosion && npm run test:game && npm run test:ball && npm run test:map && npm run test:gimmick && npm run test:scuffle && npm run test:flair",
     "test:net": "node test/net-test.js",
+    "test:ws": "node test/ws-proxy-test.js",
     "test:ragdoll": "esbuild test/ragdoll-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/ragdoll-test.mjs && node test/.build/ragdoll-test.mjs",
     "test:swap": "esbuild test/control-swap-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/control-swap-test.mjs && node test/.build/control-swap-test.mjs",
     "test:explosion": "esbuild test/explosion-repro-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/explosion-repro-test.mjs && node test/.build/explosion-repro-test.mjs",
     "test:game": "esbuild test/game-loop-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/game-loop-test.mjs && node test/.build/game-loop-test.mjs",
     "test:room": "node test/room-test.js",
-    "test:ball": "esbuild test/ball-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/ball-test.mjs && node test/.build/ball-test.mjs"
+    "test:ball": "esbuild test/ball-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/ball-test.mjs && node test/.build/ball-test.mjs",
+    "test:map": "esbuild test/map-smoke-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/map-smoke-test.mjs && node test/.build/map-smoke-test.mjs",
+    "test:gimmick": "esbuild test/gimmick-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/gimmick-test.mjs && node test/.build/gimmick-test.mjs",
+    "test:scuffle": "esbuild test/scuffle-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/scuffle-test.mjs && node test/.build/scuffle-test.mjs",
+    "test:flair": "esbuild test/flair-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/flair-test.mjs && node test/.build/flair-test.mjs"
   },
   "dependencies": {
     "cannon-es": "^0.20.0",
@@ -25,6 +33,7 @@
   "devDependencies": {
     "@types/three": "^0.169.0",
     "typescript": "^5.6.0",
+    "untun": "^0.2.2",
     "vite": "^5.4.0"
   }
 }

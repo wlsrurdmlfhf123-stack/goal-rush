@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import * as CANNON from "cannon-es";
-import { type Build, type V3, boxGeo, makeFloorTexture, makeSkyTexture, sphGeo, toyMat } from "./mapkit";
+import { type Build, type V3, boxGeo, cylGeo, makeFloorTexture, makeSkyTexture, sphGeo, toyMat } from "./mapkit";
 import { MAPS, type AddBall, type AddHazard, type AddObstacle, type AddProp, type MapDef } from "./maps";
 import { HZ, type HazardSpec } from "./hazards";
 import { OB, type ObstacleSpec } from "./obstacles";
@@ -453,7 +453,7 @@ export function createWorld(container: HTMLElement): World {
    * 낙하 장애물과 마찬가지로 맵을 만들 때 미리 만들어 두고 재활용하므로
    * 기존 objects 스냅샷으로 멀티 동기화가 공짜로 된다.
    */
-  const addObstacle: AddObstacle = (id, kind, z, arg, phase) => {
+  const addObstacle: AddObstacle = (id, kind, z, arg, phase, opts) => {
     const g = new THREE.Group();
     let body: CANNON.Body;
 
@@ -576,6 +576,119 @@ export function createWorld(container: HTMLElement): World {
         position: new CANNON.Vec3(0, OB.shutterH * 0.5, z),
         material: propMat,
       });
+    } else if (kind === "platform") {
+      // 움직이는 발판. 크기는 맵이 params.w / params.len 으로 정한다.
+      const pw = opts?.params?.w ?? OB.platW;
+      const pl = opts?.params?.len ?? OB.platD;
+      const top = new THREE.Mesh(boxGeo(pw, OB.platH, pl), toyMat(0x4dd2ff, { rough: 0.45 }));
+      top.castShadow = true; top.receiveShadow = true;
+      g.add(top);
+      // 가장자리 노란 레일 - 멀리서도 "탈 수 있는 것"으로 읽힌다
+      for (const sx of [-1, 1]) {
+        const rail = new THREE.Mesh(boxGeo(0.18, OB.platH * 1.5, pl), toyMat(0xffd166, { rough: 0.4 }));
+        rail.position.set(sx * (pw * 0.5 - 0.09), OB.platH * 0.2, 0);
+        g.add(rail);
+      }
+      body = new CANNON.Body({
+        mass: 0,
+        type: CANNON.Body.KINEMATIC,
+        shape: new CANNON.Box(new CANNON.Vec3(pw * 0.5, OB.platH * 0.5, pl * 0.5)),
+        position: new CANNON.Vec3(opts?.x ?? 0, opts?.params?.y ?? OB.platY, z),
+        material: propMat,
+      });
+    } else if (kind === "conveyor") {
+      // 컨베이어. 진행 방향으로 줄무늬를 깔아 어느 쪽으로 미는지 보이게 한다.
+      const cw = opts?.params?.w ?? OB.convW;
+      const cl = opts?.params?.len ?? OB.convD;
+      const cdir = (opts?.params?.dirZ ?? 1) >= 0 ? 1 : -1;
+      const belt = new THREE.Mesh(boxGeo(cw, OB.convH, cl), toyMat(0x2b2f45, { rough: 0.7 }));
+      belt.receiveShadow = true;
+      g.add(belt);
+      for (let k = -2; k <= 2; k++) {
+        const chev = new THREE.Mesh(boxGeo(cw * 0.62, 0.06, 0.34), toyMat(0x30d6a0, { rough: 0.3 }));
+        chev.position.set(0, OB.convH * 0.5 + 0.03, k * (cl / 5.5) + cdir * 0.2);
+        g.add(chev);
+      }
+      body = new CANNON.Body({
+        mass: 0,
+        type: CANNON.Body.KINEMATIC,
+        shape: new CANNON.Box(new CANNON.Vec3(cw * 0.5, OB.convH * 0.5, cl * 0.5)),
+        position: new CANNON.Vec3(opts?.x ?? 0, OB.convY, z),
+        material: propMat,
+      });
+    } else if (kind === "wind") {
+      // 바람 영역 - 막지 않는다. 반투명 판으로 "여기 바람이 분다"만 알린다.
+      const ww = opts?.params?.w ?? OB.windW;
+      const wl = opts?.params?.len ?? OB.windD;
+      const wdir = (opts?.params?.dirX ?? arg) >= 0 ? 1 : -1;
+      for (let k = -1; k <= 1; k++) {
+        const sheet = new THREE.Mesh(
+          boxGeo(ww * 0.9, 0.06, wl * 0.8),
+          toyMat(0x9fd0ff, { rough: 0.2, opacity: 0.22 }),
+        );
+        sheet.position.set(wdir * 0.4, OB.windH * (0.3 + k * 0.22), 0);
+        sheet.rotation.z = wdir * 0.12;
+        g.add(sheet);
+      }
+      body = new CANNON.Body({
+        mass: 0,
+        type: CANNON.Body.KINEMATIC,
+        shape: new CANNON.Box(new CANNON.Vec3(ww * 0.5, OB.windH * 0.5, wl * 0.5)),
+        position: new CANNON.Vec3(opts?.x ?? 0, OB.windH * 0.5, z),
+        material: propMat,
+      });
+      body.collisionResponse = false;   // 밀기만 하고 막지는 않는다
+    } else if (kind === "ballsocket") {
+      // 공을 넣는 링. 공이 들어가야 하므로 충돌은 끄고 바닥 표시만 남긴다.
+      const ring = new THREE.Mesh(cylGeo(OB.sockR, OB.sockR, 0.12, 22), toyMat(0xffd166, { rough: 0.35 }));
+      g.add(ring);
+      const hole = new THREE.Mesh(cylGeo(OB.sockR * 0.72, OB.sockR * 0.72, 0.16, 22), toyMat(0x1a1f2e, { rough: 0.8 }));
+      hole.position.y = 0.03;
+      g.add(hole);
+      body = new CANNON.Body({
+        mass: 0,
+        type: CANNON.Body.KINEMATIC,
+        shape: new CANNON.Cylinder(OB.sockR, OB.sockR, 0.12, 12),
+        position: new CANNON.Vec3(opts?.x ?? 0, OB.sockY, z),
+        material: propMat,
+      });
+      body.collisionResponse = false;
+    } else if (kind === "lever") {
+      // 밟는 바닥 판. 막지 않는다 - 걸려 넘어지면 스위치가 함정이 된다.
+      const lw = opts?.params?.w ?? OB.leverW;
+      const ll = opts?.params?.len ?? OB.leverD;
+      const pad = new THREE.Mesh(boxGeo(lw, 0.1, ll), toyMat(0xffd166, { rough: 0.5 }));
+      g.add(pad);
+      const inner = new THREE.Mesh(boxGeo(lw * 0.72, 0.12, ll * 0.72), toyMat(0xff8a3d, { rough: 0.4 }));
+      inner.position.y = 0.02;
+      g.add(inner);
+      body = new CANNON.Body({
+        mass: 0,
+        type: CANNON.Body.KINEMATIC,
+        shape: new CANNON.Box(new CANNON.Vec3(lw * 0.5, 0.05, ll * 0.5)),
+        position: new CANNON.Vec3(opts?.x ?? 0, OB.leverY, z),
+        material: propMat,
+      });
+      body.collisionResponse = false;
+    } else if (kind === "holdgate") {
+      // 신호 문 - coopgate 와 같은 몸체를 쓰되 색을 달리해 구분한다.
+      const gw = opts?.params?.w ?? OB.gateW;
+      const gh = opts?.params?.h ?? OB.gateH;
+      const main = new THREE.Mesh(boxGeo(gw, gh, OB.gateD), toyMat(0x8b5cf6, { rough: 0.4 }));
+      main.castShadow = true; main.receiveShadow = true;
+      g.add(main);
+      for (let k = 0; k < 3; k++) {
+        const bar = new THREE.Mesh(boxGeo(gw * 1.02, 0.2, OB.gateD * 1.06), toyMat(0xffd166, { rough: 0.35 }));
+        bar.position.y = -gh * 0.35 + k * (gh * 0.23);
+        g.add(bar);
+      }
+      body = new CANNON.Body({
+        mass: 0,
+        type: CANNON.Body.KINEMATIC,
+        shape: new CANNON.Box(new CANNON.Vec3(gw * 0.5, gh * 0.5, OB.gateD * 0.5)),
+        position: new CANNON.Vec3(opts?.x ?? 0, gh * 0.5, z),
+        material: propMat,
+      });
     } else {
       const main = new THREE.Mesh(boxGeo(OB.pistonW, OB.pistonH, OB.pistonD), toyMat(0x7c5cff, { rough: 0.4 }));
       main.castShadow = true; main.receiveShadow = true;
@@ -597,7 +710,7 @@ export function createWorld(container: HTMLElement): World {
     const obj: PhysObject = { id, mesh: g, body, grabRadius: 0, grabbable: false, mass: body.mass };
     objects.push(obj);
     objectById.set(id, obj);
-    obstacleSpecs.push({ id, kind, z, arg, phase });
+    obstacleSpecs.push({ id, kind, z, arg, phase, x: opts?.x, params: opts?.params, link: opts?.link });
   };
 
   /**

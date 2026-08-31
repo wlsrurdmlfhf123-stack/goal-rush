@@ -6,16 +6,19 @@ import { applyCarryForce, holdForceFor, type Holder } from "./carry";
 import { Net } from "./net";
 import { createMenu } from "./menu";
 import { defaultPresetFor, presetColors } from "./characters";
-import { BALL_ID, TUTORIAL_PADS, TUTORIAL_PAD_HALF } from "./maps";
+import { BALL_ID, LANE_HALF, TUTORIAL_PADS, TUTORIAL_PAD_HALF } from "./maps";
 import { createGame } from "./game";
 import { applyLook, cameraBasis, groupFor, ragdollMask } from "./input-math";
 import { surfacePointLocal } from "./shapes";
 import { B, createBallPlay } from "./ball";
 import { createFx } from "./fx";
 import { createAudio, type SfxName } from "./audio";
+import { initSettingsUI } from "./settings-ui";
 import { HZ, createHazards } from "./hazards";
 import { createObstacles } from "./obstacles";
-import { BOT, createBots } from "./bot";
+import { BOT, createBots, roleForBot } from "./bot";
+import { SC, createScuffle } from "./scuffle";
+import { createFlair } from "./flair";
 import type { GamePhase, InputState, ObjectState, RagdollSnapshot, SfxEvent } from "./protocol";
 
 const DEBUG = true;
@@ -137,6 +140,8 @@ function despawnPlayer(id: number) {
   if (!e) return;
   releaseGrabsOf(e.rag);
   ballPlay.forget(e.rag);
+  scuffle.forget(e.rag);
+  flair.forget(e.rag);
   hazards.forget(e.rag);
   obstacles.forget(e.rag);
   bots.forget(e.rag);
@@ -515,17 +520,41 @@ function tryGrab(rag: Ragdoll): boolean {
 // 1단계에서는 맵에 놓인 공 하나를 쓴다. 코스/골대는 다음 단계에서 붙인다.
 const ballPlay = createBallPlay();
 
+// ---------------------------------------------------------------- 몸싸움 (E/Q/F)
+//
+// 밀치기/잡기/발차기. 물리 조작은 전부 host 에서만 돌고, 결과는 기존 래그돌
+// 스냅샷을 타고 나간다 (새 네트워크 메시지 없음 - scuffle.ts 머리말 참고).
+//
+// [키를 뺏지 않는다] E/Q/F 는 이미 축구 조작이 쓰고 있다. 그래서 새 키를
+// 만들지 않고, **앞에 사람이 있을 때만** 몸싸움이 먼저 가져가고 실패하면
+// 원래 동작이 그대로 나가는 폴백 구조로 붙였다. 판정은 fixedUpdate 의
+// host 분기 한 곳에 모여 있다.
+const scuffle = createScuffle();
+/**
+ * 몸짓 (달리기 젖힘 / 급정지 쏠림 / 방향전환 흔들 / 착지 자세).
+ *
+ * 이동 입력은 한 줄도 안 건드리고 상체 토크만 얹는다 - 조작 반응성은 그대로다
+ * (flair.ts 머리말).
+ */
+const flair = createFlair();
+
 // ---------------------------------------------------------------- 낙하 장애물
 //
 // 코스 반폭(±7)은 맵이 정하지만 hazards는 그 값만 알면 되므로 여기서 넘긴다.
-const hazards = createHazards(world, 7);
+//
+// [주의] 폭을 맵을 만들 때 한 번만 넘기므로 **구간마다 다른 폭을 줄 수 없다.**
+// 좁은 구간(다리 / 갈래길)에 낙하물이나 봇을 배치하면 판 바깥 허공에서 헛돈다
+// - 그래서 스테이지 파일들은 좁은 구간에 그 둘을 두지 않는다. 구간별 폭이
+// 필요해지면 createHazards/createObstacles/createBots가 매 스텝 그 z의 반폭을
+// 묻도록 바꿔야 한다.
+const hazards = createHazards(world, LANE_HALF);
 
 // ---------------------------------------------------------------- 코스 장애물
 //
 // 회전봉 / 좌우 피스톤 / 굴러오는 거대 공. 낙하 장애물과 마찬가지로 바디는
 // 맵을 만들 때 미리 만들어 두므로, 여기서는 상태만 진행하면 위치가 기존
 // objects 스냅샷을 타고 클라이언트로 간다.
-const obstacles = createObstacles(world, 7);
+const obstacles = createObstacles(world, LANE_HALF);
 
 /** 코스 장애물의 소품 id (checkFalls가 건드리지 않게 하기 위해) */
 let obstacleIds = new Set<number>();
@@ -600,9 +629,43 @@ function updateHeadMarks(t: number) {
   }
 }
 
-// 사운드. 음원 파일 없이 WebAudio로 합성한다 (audio.ts 참고).
-// 브라우저 자동재생 정책 때문에 첫 사용자 입력에서 unlock() 해야 소리가 난다.
+// 사운드. client/public/audio/ 의 실제 음원 파일을 쓰고, 못 받으면 조용히
+// 합성으로 남는다 (audio.ts 참고). 자동재생 정책 때문에 첫 사용자 입력에서
+// unlock() 해야 소리가 난다.
 const sfx = createAudio();
+
+// ---- 실제 음원 파일 연결 (파일명은 그대로. 공백/특수문자 대비해 encodeURIComponent)
+const AUDIO = (file: string) => `/audio/${encodeURIComponent(file)}`;
+void sfx.loadSampleUrls({
+  touch:      AUDIO("mixkit-small-hit-in-a-game-2072.wav"),      // 드리블 터치 / 약한 접촉
+  kick:       AUDIO("mixkit-soccer-ball-kick-2099.wav"),         // 일반 킥
+  kickHard:   AUDIO("mixkit-hitting-soccer-ball-2112.wav"),      // 빠르고 강한 킥 (풀차지)
+  ballBounce: AUDIO("mixkit-ball-bouncing-in-the-ground-2077.wav"), // 공이 바닥/물체에 튕김
+  ballHard:   AUDIO("mixkit-hitting-soccer-ball-2112.wav"),      // 강한 공 충돌 / 사람끼리 세게 부딪힘
+  ragdoll:    AUDIO("mixkit-cartoon-falling-whistle-395.wav"),   // 넘어짐 (래그돌 진입)
+  trick:      AUDIO("floraphonic-movement-swipe-whoosh-3-186577.mp3"), // 개인기(Shift/Q) 성공
+  goal:       AUDIO("mixkit-game-level-completed-2059.wav"),     // 골 성공
+  crowd:      AUDIO("mixkit-stadium-joy-shouting-crowd-3022.wav"), // 관중 환호
+  countdown:  AUDIO("mixkit-start-match-countdown-1954.wav"),    // 경기 시작 카운트다운
+});
+
+// ---- BGM: 플레이 맵 3개 + 메뉴 1개.
+//  · 메뉴/대기실/결과 화면        → the_mountain (잔잔)
+//  · STAGE 1 (튜토리얼/몸풀기)     → mfcc retro arcade
+//  · STAGE 2 (레버/타이밍)        → djartmusic game console
+//  · STAGE 3 (움직이는 바닥, 격함) → hitslab video game music
+const BGM_MENU = AUDIO("the_mountain-game-game-music-508018.mp3");
+const BGM_BY_MAP = [
+  AUDIO("mfcc-retro-arcade-game-music-297305.mp3"),
+  AUDIO("djartmusic-best-game-console-301284.mp3"),
+  AUDIO("hitslab-game-gaming-video-game-music-459876.mp3"),
+];
+const bgmForMap = (i: number) => BGM_BY_MAP[i] ?? BGM_BY_MAP[BGM_BY_MAP.length - 1];
+// 볼륨: 저장된 사용자 설정(localStorage)이 있으면 그걸, 없으면 기본 밸런스
+// (BGM 0.32 / 효과음 마스터 0.9). 설정 오버레이(⚙) 슬라이더 배선도 여기서.
+initSettingsUI(sfx);
+// 메뉴 BGM. unlock() 전이면 audio.ts가 기억해 뒀다가 첫 입력에서 시작한다.
+sfx.playBgm(BGM_MENU);
 
 // ---------------------------------------------------------------- 소리 중계
 //
@@ -655,7 +718,38 @@ function netSfx(n: SfxName, by: number | null, vol = 1, rate?: number) {
   if (sfxOut.length < SFX_MAX_PER_SNAPSHOT) sfxOut.push({ n, p: by ?? undefined, v: vol, r: rate });
 }
 for (const ev of ["pointerdown", "keydown"] as const) {
-  window.addEventListener(ev, () => sfx.unlock(), { once: false, passive: true });
+  window.addEventListener(ev, () => { sfx.unlock(); reportBgmOnce(); }, { once: false, passive: true });
+}
+
+// ---------------------------------------------------------------- 오디오 진단
+//
+// "소리가 안 난다"의 원인은 사실상 셋 중 하나인데 화면에는 흔적을 안 남긴다:
+//   1) 자동재생이 아직 안 풀렸다         -> bgm.want 만 있고 src 가 없다
+//   2) 볼륨이 0 이다 (저장된 슬라이더 값) -> paused=false 인데 volume=0
+//   3) 파일을 못 받았다                  -> bgm.error 에 사유가 남는다
+// 첫 입력 직후 한 번 콘솔에 찍고, 언제든 audioDebug() 로 다시 본다.
+(window as unknown as { audioDebug: () => unknown }).audioDebug = () => sfx.status();
+
+let bgmReported = false;
+function reportBgmOnce() {
+  if (bgmReported) return;
+  bgmReported = true;
+  window.setTimeout(() => {
+    const st = sfx.status();
+    const b = st.bgm;
+    if (b.error) {
+      console.warn("[audio] BGM 재생 실패:", b.error, st);
+    } else if (!b.src) {
+      console.warn("[audio] BGM 이 아직 시작되지 않았다 (want =", b.want, ")", st);
+    } else if (b.volume === 0) {
+      console.warn(
+        "[audio] BGM 은 재생 중인데 볼륨이 0 이다 - 설정(⚙)에서 BGM 슬라이더를 올려라. " +
+        "localStorage['gr.vol.bgm'] = " + JSON.stringify(localStorage.getItem("gr.vol.bgm")), st,
+      );
+    } else if (DEBUG) {
+      console.log("[audio] BGM ok:", decodeURIComponent(b.src.split("/audio/")[1] ?? b.src), "vol", b.volume);
+    }
+  }, 1500);
 }
 
 /**
@@ -747,7 +841,7 @@ function isMine(rag: Ragdoll): boolean {
 /** 잔상을 몇 프레임에 한 번 찍을지 세는 카운터 */
 let trailSkip = 0;
 
-const bots = createBots(7);
+const bots = createBots(LANE_HALF);
 
 /**
  * host 전용. 봇 등장 이벤트.
@@ -973,6 +1067,38 @@ function ballBody(): CANNON.Body | null {
   const o = objectById.get(BALL_ID);
   return o ? o.body : null;
 }
+
+// ---- 공 물리 충돌음 (공이 바닥·벽·장애물에 부딪힐 때)
+//
+// [난사 방지] cannon의 collide 이벤트는 구르는 동안에도 매 스텝 들어온다.
+//  (1) 충격 속도가 약하면(굴러가는 접촉) 무시  (2) 70ms 디바운스
+//  (3) audio.ts의 MIN_GAP(ballBounce 0.11s / ballHard 0.14s)
+// host에서만 판정하고, 소리는 netSfx로 로컬 재생 + 스냅샷에 실어 친구에게도.
+const BALL_HIT_MIN = 1.8;    // m/s - 이 미만 충돌은 무음
+const BALL_HIT_HARD = 5.5;   // m/s - 이 이상이면 "강한 공 충돌"
+let ballHitAt = 0;
+let ballSfxBody: CANNON.Body | null = null;
+function onBallCollide(ev: { contact: CANNON.ContactEquation }) {
+  if (!authority) return;
+  const now = performance.now();
+  if (now - ballHitAt < 70) return;
+  let v = 0;
+  try { v = Math.abs(ev.contact.getImpactVelocityAlongNormal()); } catch { return; }
+  if (!Number.isFinite(v) || v < BALL_HIT_MIN) return;
+  ballHitAt = now;
+  const hard = v >= BALL_HIT_HARD;
+  netSfx(hard ? "ballHard" : "ballBounce", null, hard ? 0.85 : Math.min(0.75, 0.28 + v * 0.07));
+}
+/** 맵을 갈아끼우면 공 바디가 새로 생기므로 리스너를 다시 건다 */
+function attachBallSfx() {
+  const b = ballBody();
+  if (b === ballSfxBody) return;
+  if (ballSfxBody) ballSfxBody.removeEventListener("collide", onBallCollide);
+  ballSfxBody = b;
+  if (b) b.addEventListener("collide", onBallCollide);
+}
+world.onMapLoaded(attachBallSfx);
+attachBallSfx();
 
 // ---------------------------------------------------------------- 네트워크
 // 소켓은 아직 열지 않는다. 타이틀 화면에서 모드를 고르면 menu.ts가
@@ -1265,6 +1391,10 @@ function resetWorld() {
   fallingNow.clear();
   dramaAt.clear();
   dramaAnyAt = -1e9;
+  // 몸싸움 상태(잡기/쿨다운/무적/밀림)도 새 판 기준으로 지운다. 특히 잡기를
+  // 안 지우면 텔레포트한 뒤에도 당기는 힘이 남아 둘이 서로 끌려간다.
+  scuffle.reset();
+  flair.reset();
   // 1) 잡고 있던 것부터 전부 놓는다 (제약을 남긴 채 텔레포트하면 폭발한다)
   for (const e of playersById.values()) releaseGrabsOf(e.rag);
   for (const g of grabs) if (g.constraint) physics.removeConstraint(g.constraint);
@@ -1318,6 +1448,7 @@ const game = createGame(world, {
   isBallCarried: () => grabs.some((g) => g.objectId === BALL_ID),
   onGoal: () => {
     sfx.play("goal");
+    sfx.play("crowd", { vol: 0.9 });   // 관중 환호
     addShake(0.7);
     // 골대 앞에서 색종이처럼 링이 퍼진다
     const gz = world.map.goal.z;
@@ -1351,8 +1482,14 @@ const TUTORIAL_TEXT: Record<string, string> = {
 
 function updateTutorial(target: CANNON.Body | null) {
   if (!elTut) return;
-  // Goal Rush 코스에서만. 다른 맵에는 패드가 없다.
-  if (!target || !inGame || world.map.id !== "goalrush") { elTut.hidden = true; return; }
+  // 패드를 깔아 둔 맵에서만. 다른 맵에는 바닥에 아무것도 안 적혀 있다.
+  //
+  // [예전에는 여기서 아무것도 안 떴다] 조건이 `world.map.id !== "goalrush"`
+  // 였는데 `goalrush`라는 id를 가진 맵은 존재한 적이 없다. 그래서 바닥 패드는
+  // 그려지는데 HUD 한 줄이 한 번도 안 나왔다. 맵 id를 문자열로 맞추는 대신
+  // 맵이 스스로 선언한 플래그를 본다 - 스테이지가 늘어도 여기를 다시 고칠
+  // 일이 없다.
+  if (!target || !inGame || !world.map.tutorial) { elTut.hidden = true; return; }
   const z = target.position.z;
   const pad = TUTORIAL_PADS.find(([pz]) => Math.abs(z - pz) <= TUTORIAL_PAD_HALF);
   if (!pad) { elTut.hidden = true; return; }
@@ -1570,10 +1707,62 @@ function updateBotHint(dt: number, me: Ragdoll | null) {
 const BUMP_DIST = 1.15;
 /** 서로 가까워지는 속도가 이 이상이어야 넘어진다 (m/s) */
 const BUMP_CLOSING = 3.2;
+/**
+ * 이 속도부터는 넘어지지는 않고 **둘 다 휘청인다** (m/s).
+ *
+ * [왜 한 칸을 더 두는가] 예전에는 문턱(3.2) 아래면 아무 일도 안 일어났다.
+ * 그래서 마주 걸어와 부딪히면 두 사람이 그냥 서로를 통과한 것처럼 미끄러졌고,
+ * 조금만 더 빨리 오면 갑자기 둘 다 자빠졌다 - 가운데가 없었다. 그 사이를
+ * 채우면 "달리다 어깨 부딪혀서 어어" 가 생긴다 (scuffle.ts SC.BUMP_* 주석).
+ */
+const BUMP_SOFT_CLOSING = 1.5;
 const BUMP_COOLDOWN = 1.6;
 const bumpCooldown = new Map<number, number>();
 /** 부딪힐 때마다 같은 글자가 뜨면 세 번째부터는 안 웃긴다 - 돌려 쓴다 */
+/**
+ * 맞은 사람이 안고 있던 것을 놓치게 한다 (몸싸움 전용).
+ *
+ * 장애물에 맞았을 때의 처리(아래 hits 루프)와 같은 일을 한다 - 놓은 순간
+ * 맞은 방향으로 살짝 튕겨 나가게 해서 "놓쳤다"가 보이게 만든다. 공 물리를
+ * 바꾸는 게 아니라 잡기를 푸는 것이라, 굴러가는 건 기존 물리 그대로다.
+ *
+ * 친구가 공을 안고 골로 달릴 때 이걸 막을 수단이 생긴다 = 방해가 성립한다.
+ */
+function dropCarried(rag: Ragdoll, dirX: number, dirZ: number, byId: number) {
+  const links = grabsOf(rag);
+  if (links.length === 0) return;
+  for (const g of links) {
+    const obj = objectById.get(g.objectId);
+    if (obj) obj.body.applyImpulse(new CANNON.Vec3(dirX * 2.6, 1.4, dirZ * 2.6));
+  }
+  releaseGrabsOf(rag);
+  netSfx("drop", byId, 0.8, 1.05);
+  if (isMine(rag) || playersById.get(byId)?.rag === myRag()) {
+    if (!dramaLine("steal", STEAL_LINES, 5)) showMove("놓쳤다!", "안고 있던 공이 튀어나갔다");
+  }
+}
+
 const BUMP_LINES = ["쿵!", "야 앞에 봐", "둘 다 넘어짐"];
+// 몸싸움 대사. 기존 dramaLine 배관을 그대로 쓴다 (겹쳐 뜨지 않게 간격이 걸린다).
+const PUSH_LINES = ["저리 가!", "밀었다", "어어어", "비켜봐"];
+const PUSH_HARD_LINES = ["제대로 박았다", "퍽!", "날아가라"];
+const KICK_LINES = ["뻥!", "차버렸다", "굴러간다", "안녕히 가세요"];
+// 같은 E라도 어디를 맞혔는지에 따라 다른 글자가 뜬다. 화면이 매번 같으면
+// "뒤로 돌아가서 밀기"가 정면으로 미는 것과 구별되지 않는다.
+const PUSH_SOFT_LINES = ["툭", "스쳤다", "비켜비켜"];
+const PUSH_BACK_LINES = ["뒤에서 몰래", "등 떠밀기", "앞으로 고꾸라져라"];
+const PUSH_SIDE_LINES = ["옆구리!", "빙그르르", "휘청"];
+/** 차인 사람이 벽에 박아 되튕긴 순간 */
+const REBOUND_LINES = ["벽에 박았다", "퉁!", "튕겨 나왔다", "한 번 더 굴러"];
+/** 잡은 채로 홱 돌려서 던진 순간 */
+const WHIP_LINES = ["원심력!", "빙 돌려서", "던져버렸다"];
+/** 서로 잡고 버티는 중 */
+const TUG_LINES = ["줄다리기!", "안 놔", "누가 이기나 보자"];
+/** 달리다 서로 부딪혀 휘청인 순간 (넘어지지는 않았다) */
+const NUDGE_LINES = ["어이쿠", "부딪혔다", "미안"];
+const GRAB_LINES = ["붙잡았다", "어딜 가", "같이 가자"];
+/** 공을 안고 있던 친구를 떨어뜨렸을 때 */
+const STEAL_LINES = ["공 놓쳤다!", "내놔", "그거 이제 내 거"];
 
 function updatePlayerBumps(dt: number) {
   if (!authority) return;
@@ -1592,6 +1781,14 @@ function updatePlayerBumps(dt: number) {
       if (isBot(a.id) || isBot(b.id)) continue;
       if (a.rag.state !== "ACTIVE" || b.rag.state !== "ACTIVE") continue;
       if (bumpCooldown.has(a.id) || bumpCooldown.has(b.id)) continue;
+      // [몸싸움과 겹치지 않게] 기존 장치는 그대로 두고 두 경우만 건너뛴다.
+      //  1) 방금 E/F로 맞은 사람 - 날아가는 속도 그대로 제3자에게 꽂히면 bump가
+      //     다시 양쪽을 넘어뜨려서 한 번의 발차기가 연쇄 경직이 된다.
+      //     scuffle 의 피격 무적(0.65초) 동안 막으면 그 연쇄만 끊긴다.
+      //  2) 잡고 끄는 중인 둘 - 붙어 있는 게 정상인데 접근속도가 잠깐만 넘어도
+      //     둘 다 자빠져서 잡기가 성립하지 않는다.
+      if (scuffle.isImmune(a.rag) || scuffle.isImmune(b.rag)) continue;
+      if (scuffle.holding(a.rag) === b.rag || scuffle.holding(b.rag) === a.rag) continue;
       const pa = a.rag.pelvis.position, pb = b.rag.pelvis.position;
       let dx = pb.x - pa.x, dz = pb.z - pa.z;
       const d = Math.hypot(dx, dz);
@@ -1600,7 +1797,25 @@ function updatePlayerBumps(dt: number) {
       dx /= d; dz /= d;
       const va = a.rag.pelvis.velocity, vb = b.rag.pelvis.velocity;
       const closing = (va.x - vb.x) * dx + (va.z - vb.z) * dz;
-      if (closing < BUMP_CLOSING) continue;
+      if (closing < BUMP_CLOSING) {
+        // ---- 가벼운 충돌: 넘어뜨리지 않고 둘 다 비틀거리게 한다.
+        // 아래의 기존 넘어뜨리기 코드는 한 줄도 안 바뀐다 (문턱 위는 그대로).
+        if (closing >= BUMP_SOFT_CLOSING) {
+          const pw = (closing - BUMP_SOFT_CLOSING) / (BUMP_CLOSING - BUMP_SOFT_CLOSING);
+          if (scuffle.tryBump(a.rag, b.rag, dx, dz, 0.4 + pw * 0.6)) {
+            const cx = (pa.x + pb.x) * 0.5, cz = (pa.z + pb.z) * 0.5;
+            // 같은 "hit"을 아주 가볍고 높게 = 툭 부딪힌 소리 (새 음원 없음)
+            netSfx("hit", null, 0.3 + pw * 0.25, 1.7);
+            fx.dash(cx, cz, dx, dz);
+            fx.dash(cx, cz, -dx, -dz);
+            if (isMine(a.rag) || isMine(b.rag)) {
+              addShake(0.2 + pw * 0.2);
+              if (pw > 0.5 && !dramaLine("nudge", NUDGE_LINES, 8)) showMove("어이쿠", "부딪혀서 휘청였다");
+            }
+          }
+        }
+        continue;
+      }
 
       a.rag.knockdown(1.1);
       b.rag.knockdown(1.1);
@@ -2136,7 +2351,7 @@ function updateLocalSfx() {
     const was = prevRagState.get(e.id);
     prevRagState.set(e.id, e.rag.state);
     if (was === undefined || was !== "ACTIVE" || e.rag.state === "ACTIVE") continue;
-    playFor("hit", e.id, 0.85, 1.05);
+    playFor("ragdoll", e.id, 0.9, 1.0);   // 래그돌 진입 - 이 전이는 1회만 잡힌다
     if (isMyId(e.id)) addShake(0.5);
   }
   for (const id of [...prevRagState.keys()]) if (!playersById.has(id)) prevRagState.delete(id);
@@ -2158,7 +2373,7 @@ function updateLocalSfx() {
   // 골 / 실패. host는 game 훅에서 울리지만 그 훅은 host에서만 돈다.
   const ph = game.phase;
   if (ph !== sfxPrevPhase) {
-    if (ph === "success") { sfx.play("goal"); addShake(0.7); }
+    if (ph === "success") { sfx.play("goal"); sfx.play("crowd", { vol: 0.9 }); addShake(0.7); }
     else if (ph === "fail") sfx.play("fail");
     sfxPrevPhase = ph;
   }
@@ -2277,9 +2492,28 @@ function updateCountdown(dt: number) {
     const m = world.map;
     const head = `<div class="cd-stage">STAGE ${world.mapIndex + 1} / ${world.mapCount} · ${m.name.replace(/^\d+\.\s*/, "")}<em>${m.blurb}</em></div>`;
     elCountdown.innerHTML = `${head}<span>${n > 0 ? n : "GO!"}</span>`;
-    sfx.play(n > 0 ? "countdown" : "start");
+    // 카운트다운 효과음은 시작 시 1회만 (파일이 "3·2·1" 전체 시퀀스다).
+    // GO! 순간에 그 맵의 경기 BGM을 시작한다.
+    if (n >= 3) sfx.play("countdown");
+    else if (n <= 0) { sfx.play("start"); sfx.playBgm(bgmForMap(world.mapIndex)); }
   }
   if (countdown <= 0) elCountdown.hidden = true;
+}
+
+// ---- 게임 단계에 따른 BGM 정리
+//
+// 골(success) / 시간초과(fail) 즉시 경기 BGM을 끊고 결과 화면 음악(메뉴 곡)으로
+// 바꾼다. 다음 맵으로 넘어가면 그 맵 카운트다운 GO 에서 다시 교체된다.
+// audio.ts playBgm 이 이전 <audio>를 즉시 폐기하므로 두 곡이 겹치지 않는다.
+// host/비-host 모두 game.phase 를 갖고 있어 양쪽에서 동일하게 돈다.
+let bgmPhase: GamePhase = "playing";
+function updateBgmForPhase() {
+  if (!inGame) return;
+  const ph = game.phase;
+  if (ph === bgmPhase) return;
+  bgmPhase = ph;
+  if (ph === "playing") return;          // 카운트다운 GO 가 맵 BGM을 시작한다
+  sfx.playBgm(BGM_MENU);                  // success / fail → 경기 BGM 즉시 정지
 }
 
 // ---------------------------------------------------------------- 킥 게이지
@@ -2476,18 +2710,162 @@ function fixedUpdate(dt: number) {
       .filter((e) => !isBot(e.id) && grabsOf(e.rag).some((g) => g.objectId === BALL_ID))
       .map((e) => e.rag);
 
+    // ---- 몸싸움 한 스텝 (쿨다운 / 피격 무적 / 밀림 시간을 흘려보낸다).
+    // 판정보다 먼저 부른다 - 그래야 이번 스텝에 만료된 쿨다운이 이번 입력에 반영된다.
+    // 되튕김: F로 날아간 사람이 벽/기둥에 박으면 여기서 돌아온다
+    // (scuffle.ts SC.REBOUND_* 주석 - 충돌 이벤트가 아니라 속도 손실로 잡는다)
+    for (const rb of scuffle.tick(dt, physics)) {
+      // 새 음원을 만들지 않는다. 같은 "hit"을 제일 낮은 피치로 = 둔탁한 "퉁"
+      netSfx("hit", null, 0.55 + rb.power * 0.45, 0.62);
+      fx.kick(rb.x, rb.y, rb.z, rb.power);
+      // 맞은 사람이 내 캐릭터면 화면이 크게 흔들린다 (남이면 구경만)
+      addShake(isMine(rb.rag) ? 0.6 + rb.power * 0.5 : 0.2 + rb.power * 0.2);
+      // 이건 둘 중 누구에게 일어나도 웃긴 장면이라 항상 띄운다
+      if (!dramaLine("rebound", REBOUND_LINES, 4)) showMove("퉁!", "날아가다 부딪혔다");
+    }
+    // 몸싸움의 후보 목록. 봇도 넣는다 - 봇을 미는 것도 똑같이 성립하고, 봇은
+    // 조준(aim)을 주지 않으므로 findFront 의 첫 줄에서 걸려 스스로는 못 때린다.
+    const allRags = [...playersById.values()].map((e) => e.rag);
+
     // ---- 물리 제어
     for (const e of playersById.values()) {
+      // 몸싸움 판정이 쓰는 조준. 「서로조종」이라 이 값은 이 캐릭터를 모는
+      // 사람의 카메라에서 온다 (applyInput 주석 참고).
+      const aimX = e.input.aimX ?? 0, aimZ = e.input.aimZ ?? 0;
+      // ---- E: 앞에 사람이 있으면 밀치기, 없으면 원래대로 공 줍기/놓기.
+      //
+      // [기존 E를 지우지 않는 방식] tryPush 가 null 을 돌려주면(앞에 아무도
+      // 없거나 쿨다운/무적) 아래 else 가 예전 코드 그대로 돈다. 그래서 공만
+      // 있는 상황의 E는 전과 완전히 같다.
+      //
+      // 공을 안고 있을 때 앞을 사람이 막아도 갇히지 않는다: 첫 E가 그 사람을
+      // 밀고, 0.5초 쿨다운(PUSH_COOLDOWN) 동안의 E는 tryPush 가 null 이라
+      // 그대로 "놓기"로 떨어진다.
       if (e.grabPending) {
         e.grabPending = false;
-        // 손이 안 닿으면 "줍는 동작"을 시작한다. 드리블 중인 공은 항상 발 앞
-        // 1m 넘게 있어서 그냥 눌러서는 절대 안 잡힌다 (ball.ts scoopRange 주석).
-        const holding = grabsOf(e.rag).length > 0;
-        if (holding) netSfx("drop", e.id);
-        const grabbed = tryGrab(e.rag);
-        if (!holding && grabbed) netSfx("pickup", e.id);
-        const bb = ballBody();
-        if (!holding && !grabbed && bb) ballPlay.requestPickup(e.rag, bb);
+        const pushed = scuffle.tryPush(e.rag, aimX, aimZ, allRags);
+        if (pushed) {
+          // 세기(power)가 소리·먼지·흔들림에 그대로 실린다. 툭 스친 것과
+          // 정통으로 박은 것이 눈과 귀로 구별돼야 "제대로 맞혔다"가 생긴다.
+          const k = pushed.power;
+          const side = pushed.side;
+          const tp = pushed.target.pelvis.position;
+          // [새 음원을 안 만든다] 같은 "hit" 하나로 네 상황을 구별한다 - 피치만
+          // 바꾼다. 등을 밀면 낮고 두툼하게(제일 크게 밀리는 쪽), 옆구리는
+          // 높게(몸이 돌아가는 소리), 정면은 예전 그대로.
+          const rate = (side === "back" ? 1.18 : side === "side" ? 1.56 : 1.42) - k * 0.22;
+          netSfx("hit", e.id, 0.45 + k * 0.5, rate);
+          // 맞은 자리에 작은 링 + 밀려나는 쪽으로 먼지
+          fx.touch(tp.x, tp.y - 0.1, tp.z, 0.5 + k * 0.5);
+          fx.dash(tp.x, tp.z, pushed.dirX, pushed.dirZ);
+          // 정통으로 박았을 때만 큰 링을 하나 더 (툭 스친 것과 눈으로 갈린다)
+          if (k > 0.8) fx.kick(tp.x, tp.y - 0.1, tp.z, 0.5);
+          if (isMine(e.rag)) {
+            addShake((side === "back" ? 0.2 : 0.16) + k * 0.26);
+            // 약하게 스침 / 등 / 옆구리 / 정면 - 네 갈래로 글자가 갈린다.
+            // 무엇이 일어났는지 화면이 말해주지 않으면 방향 차이는 그냥 안 보인다.
+            const lines = k < 0.55 ? PUSH_SOFT_LINES
+              : side === "back" ? PUSH_BACK_LINES
+                : side === "side" ? PUSH_SIDE_LINES
+                  : k > 0.8 ? PUSH_HARD_LINES : PUSH_LINES;
+            const desc = k < 0.55 ? "살짝 스쳤다"
+              : side === "back" ? "등을 떠밀었다"
+                : side === "side" ? "옆에서 밀어 돌렸다" : "정통으로 박았다";
+            if (!dramaLine("scuffle", lines, k < 0.55 ? 7 : 5)) showMove("밀치기", desc);
+          }
+          if (isMine(pushed.target)) addShake(0.3 + k * 0.4);
+          // 세게 맞으면 안고 있던 공을 놓친다 - 친구 방해의 핵심이다.
+          // (장애물에 맞았을 때와 같은 처리를 그대로 쓴다)
+          //
+          // [어디를 밀었는지가 여기서 값을 한다] 등을 밀면 훨씬 쉽게 떨어뜨리고,
+          // 정면으로 밀면 버티고 선 채로 맞는 것이라 잘 안 놓친다. 그래서
+          // "공 든 친구 뒤로 돌아가기"가 실제로 이득이 되는 행동이 된다.
+          const dropAt = side === "back" ? 0.5 : side === "side" ? 0.62 : 0.78;
+          const hadBall = grabsOf(pushed.target).some((g) => g.objectId === BALL_ID);
+          if (k > dropAt) {
+            dropCarried(pushed.target, pushed.dirX, pushed.dirZ, e.id);
+            // 공을 실제로 떨어뜨렸을 때만 따로 보인다 (dropCarried 가 소리와
+            // 대사를 이미 낸다 - 여기서는 눈에 보이는 몫만 더한다)
+            if (hadBall) {
+              fx.kick(tp.x, tp.y, tp.z, 0.9);
+              if (isMine(e.rag) || isMine(pushed.target)) addShake(0.55);
+            }
+          }
+        } else {
+          // 손이 안 닿으면 "줍는 동작"을 시작한다. 드리블 중인 공은 항상 발 앞
+          // 1m 넘게 있어서 그냥 눌러서는 절대 안 잡힌다 (ball.ts scoopRange 주석).
+          const holding = grabsOf(e.rag).length > 0;
+          if (holding) netSfx("drop", e.id);
+          const grabbed = tryGrab(e.rag);
+          if (!holding && grabbed) netSfx("pickup", e.id);
+          const bb = ballBody();
+          if (!holding && !grabbed && bb) ballPlay.requestPickup(e.rag, bb);
+        }
+      }
+
+      // ---- Q: 앞에 사람이 있으면 잡기/놓기, 없으면 원래대로 스톱턴.
+      //
+      // 성공했을 때만 stopPending 을 먹는다. 실패하면 플래그를 그대로 남겨서
+      // 아래 축구 블록의 `tryStopTurn` 이 예전과 똑같이 처리한다.
+      // 이미 누군가를 잡고 있으면 toggleGrab 이 대상과 무관하게 "released" 를
+      // 돌려주므로, 잡은 채로 Q를 다시 누르면 항상 놓는다.
+      if (e.stopPending) {
+        const g = scuffle.toggleGrab(e.rag, aimX, aimZ, allRags);
+        if (g) {
+          e.stopPending = false;
+          const pp = e.rag.pelvis.position;
+          if (g === "grabbed") {
+            netSfx("pickup", e.id, 0.85, 0.8);
+            const held = scuffle.holding(e.rag);
+            if (held) fx.touch(held.pelvis.position.x, held.pelvis.position.y, held.pelvis.position.z, 0.5);
+            if (isMine(e.rag)) {
+              addShake(0.2);
+              if (!dramaLine("scuffle", GRAB_LINES, 6)) showMove("붙잡기", "Q로 놓는다 · 반대로 걸으면 뿌리친다");
+            }
+            // 잡힌 쪽에도 알려준다. 안 그러면 갑자기 몸이 끌려가는 이유를 모른다.
+            if (held && isMine(held)) { addShake(0.3); showMove("붙잡혔다!", "반대로 걸으면 뿌리칠 수 있다"); }
+          } else {
+            netSfx("drop", e.id, 0.8, 1.1);
+            fx.dash(pp.x, pp.z, aimX, aimZ);
+          }
+        }
+      }
+
+      // ---- F: 앞사람 발차기, 아니면 원래대로 공 킥.
+      //
+      // [차징을 깨지 않는 이유] kickPending 은 F를 **뗄 때** 서는 엣지다
+      // (releaseKickCharge). 누르는 순간에는 여기서 아무 판정도 하지 않으므로
+      // hold-to-charge 는 원래대로 그대로 돈다. 탭/홀드를 새로 나눌 필요가 없었다.
+      //
+      // [축구를 지키는 한 줄] 공이 발밑(B.kickRange 안)에 있으면 무조건 기존
+      // 공 킥이다. 이 거리가 ball.ts tryKick 이 성공하는 조건 그 자체라서,
+      // "찰 수 있는 공이 있었는데 사람을 찼다"가 원리적으로 일어나지 않는다.
+      // 사람 발차기는 공이 발밑에 없을 때만 나간다.
+      if (e.kickPending) {
+        const kb = ballBody();
+        const pp = e.rag.pelvis.position;
+        const ballAtFoot = !!kb && Math.hypot(kb.position.x - pp.x, kb.position.z - pp.z) <= B.kickRange;
+        if (!ballAtFoot) {
+          const k = scuffle.tryKick(e.rag, aimX, aimZ, allRags);
+          if (k) {
+            e.kickPending = false;
+            e.kickPower = 0;
+            const tp = k.target.pelvis.position;
+            netSfx("hit", e.id, 1, 0.78);
+            // 찬 자리와 맞은 자리 양쪽에 - 발차기는 E보다 확실히 크게 보여야 한다
+            fx.kick(tp.x, tp.y, tp.z, 1);
+            fx.kick(pp.x, 0.4, pp.z, 0.7);
+            fx.dash(tp.x, tp.z, k.dirX, k.dirZ);
+            if (isMine(e.rag)) {
+              addShake(0.6);
+              if (!dramaLine("scuffle", KICK_LINES, 5)) showMove("발차기", "제대로 걷어찼다");
+            }
+            if (isMine(k.target)) addShake(1);
+            // 발차기는 항상 놓치게 한다 (넉다운이라 어차피 캐리는 풀린다 -
+            //  여기서는 공이 맞은 방향으로 튀어나가는 그림까지 만들어 준다)
+            dropCarried(k.target, k.dirX, k.dirZ, e.id);
+          }
+        }
       }
       // 잡고 있는 물체 + "각 손이 붙잡은 지점"을 함께 넘긴다.
       // 지점은 물체 로컬로 보관하다가 여기서 월드로 변환하므로, 물체가 밀려
@@ -2520,7 +2898,14 @@ function fixedUpdate(dt: number) {
       if (isBot(e.id)) {
         const bb = ballBody();
         if (bb) {
-          const r = bots.update(e.rag, bb, dt, carriers);
+          // 역할(chaser/blocker/bruiser)은 봇 id로 정해진다 (roleForBot).
+          // 봇이 읽는 건 전부 월드 상태(공·사람 위치, 골 z)이지 키 입력이 아니다.
+          const r = bots.update(e.rag, bb, dt, {
+            carriers,
+            humans: [...playersById.values()].filter((x) => !isBot(x.id)).map((x) => x.rag),
+            goalZ: world.map.goal.z,
+            role: roleForBot(e.id),
+          });
           e.input.moveX = r.input.moveX;
           e.input.moveZ = r.input.moveZ;
           e.input.jump = false;
@@ -2538,6 +2923,17 @@ function fixedUpdate(dt: number) {
               }
             }
             releaseGrabsOf(owner.rag);
+          }
+          // chaser가 공 다툼 중인 사람에게 엉겨 태클했다 - 사람도 넘어뜨리고
+          // 연출을 붙인다 (봇은 bot.ts 안에서 이미 스스로 knockdown 된다).
+          for (const h of r.tackled) {
+            h.knockdown(BOT.tackleKnockTime);
+            const owner = [...playersById.values()].find((x) => x.rag === h);
+            netSfx("ballHard", owner?.id ?? null, 0.9, 0.8);
+            const hp = h.pelvis.position;
+            fx.dash(hp.x, hp.z, hp.x - e.rag.pelvis.position.x, hp.z - e.rag.pelvis.position.z);
+            fx.kick(hp.x, 0.05, hp.z, 0.6);
+            if (isMine(h) || isMine(e.rag)) addShake(0.7);
           }
         } else {
           e.input.moveX = 0; e.input.moveZ = 0;
@@ -2561,7 +2957,71 @@ function fixedUpdate(dt: number) {
         e.input.moveX = nx / l; e.input.moveZ = nz / l;
       }
 
+      // 밀린 사람은 잠깐(PUSH_STUN=0.3초) 이동 입력이 뒤로 덮어써진다.
+      // dashDir/rushDir 과 똑같은 방식이다 - control() 은 건드리지 않고
+      // "무엇을 입력으로 줄지"만 바꾼다. 제어가 살아 있어서 넘어지지는 않고
+      // 비틀거리며 밀려나기만 한다 (scuffle.ts 머리말).
+      // 대시/러시보다 뒤에 둔다: 맞은 것이 자기 개인기보다 우선이다.
+      const sh = scuffle.shoveDir(e.rag);
+      if (sh) { e.input.moveX = sh.x; e.input.moveZ = sh.z; }
+
+      // 잡힌 사람은 잡은 사람 쪽으로 끌려간다 (Q).
+      //
+      // updateHolds() 의 당기는 힘만으로는 안 끌려온다 - 잡힌 사람의 control()
+      // 서보가 그 힘을 도로 지운다(scuffle.ts GRAB_DRAG 주석의 실측). 그래서
+      // 여기서도 밀치기와 같은 길을 쓴다: 이동 입력을 섞는다. 통째로 뺏지 않는
+      // 이유는 잡힌 쪽이 반대로 걸어 저항할 수 있어야 하기 때문이다.
+      // 이미 GRAB_AHEAD 안쪽이면 건드리지 않는다 (밀고 들어가면 둘이 겹친다).
+      const holder = scuffle.heldBy(e.rag);
+      if (holder) {
+        const hp = holder.pelvis.position, tp = e.rag.pelvis.position;
+        const dx = hp.x - tp.x, dz = hp.z - tp.z;
+        const d = Math.hypot(dx, dz);
+        if (d > SC.GRAB_AHEAD) {
+          const ux = dx / d, uz = dz / d;
+          // 반대로 걸어서 버티면 끌림이 약해진다 (SC.GRAB_RESIST 주석의 실측).
+          // 저항을 안 보면 조작을 통째로 빼앗긴 것이 되고, 그러면 잡힌 쪽은
+          // 아무것도 못 하고 구경만 하게 된다.
+          // 버티는 만큼 끌리는 방향을 옆으로 튼다 (SC.GRAB_RESIST 주석 참고).
+          let gx = ux, gz = uz;
+          const own = Math.hypot(e.input.moveX, e.input.moveZ);
+          if (own > 0.01) {
+            const push = (e.input.moveX * ux + e.input.moveZ * uz) / own;
+            if (push < 0) {
+              // 트는 쪽은 상대가 실제로 가려는 쪽(끌림 방향의 수직 성분)으로.
+              // 그래야 버티면서 몸을 빼는 방향이 조작에 반영된다.
+              let side = (e.input.moveX * -uz + e.input.moveZ * ux) / own;
+              if (Math.abs(side) < 1e-3) side = 1;
+              const th = SC.GRAB_RESIST * -push * Math.sign(side);
+              const c = Math.cos(th), s = Math.sin(th);
+              gx = ux * c - uz * s; gz = ux * s + uz * c;
+            }
+          }
+          const nx = gx * SC.GRAB_DRAG + e.input.moveX * (1 - SC.GRAB_DRAG);
+          const nz = gz * SC.GRAB_DRAG + e.input.moveZ * (1 - SC.GRAB_DRAG);
+          const l = Math.hypot(nx, nz) || 1;
+          e.input.moveX = nx / l; e.input.moveZ = nz / l;
+        }
+      }
+
       e.rag.control(dt, e.input, physics);
+
+      // ---- 몸짓: 달릴 때 젖히고, 급정지에 쏠리고, 방향을 틀면 흔들리고,
+      // 세게 떨어지면 털썩 주저앉는다.
+      //
+      // control() **뒤**에 부른다 - 이번 스텝의 속도/접지를 읽고 그 위에 상체
+      // 토크만 얹는다. 이동 입력은 한 줄도 안 건드리므로 조작 반응성은 그대로다
+      // (flair.ts 머리말). 토크는 physics.step() 전까지 누적되므로 뒤에 얹어도
+      // 같은 스텝에 반영된다.
+      const fe = flair.update(e.rag, dt);
+      if (fe && fe.kind === "land" && fe.power > 0.5) {
+        // 착지 먼지. 소리는 기존 updateFootsteps 의 "land"가 이미 낸다 -
+        // 여기서 또 내면 한 번의 착지에 소리가 둘이 된다.
+        fx.kick(fe.x, 0.04, fe.z, fe.power * 0.6);
+      } else if (fe && fe.kind === "stop" && fe.power > 0.4) {
+        // 급정지: 발밑에서 먼지가 앞으로 밀린다
+        fx.dash(fe.x, fe.z, fe.dirX, fe.dirZ);
+      }
 
       // ---- 공 조작 (드리블 / 개인기 / 안고 뛰기 페널티)
       //
@@ -2701,12 +3161,46 @@ function fixedUpdate(dt: number) {
       // 코스 장애물(회전봉/피스톤/거대 공)도 같은 방식으로 진행한다.
       // 회전봉과 피스톤은 kinematic이라 부딪힌 쪽이 실제로 밀려나고,
       // 거대 공에 맞은 사람만 여기서 넉백 처리를 받는다.
-      const obHits = obstacles.update(dt, rags);
+      const obHits = obstacles.update(dt, rags, ballBody() ?? undefined);
       updateBotSpawns();
       updateCoopPass();
       syncCoopGates();
       updateBallBackstop(dt);
       updateSlotUnstick(dt);
+      // 잡고 있는 사람을 앞으로 끌어당긴다. physics.step 전에 불러야 이번
+      // 스텝의 힘으로 들어간다 (스텝 끝의 clearForces 가 지우기 전).
+      for (const d of scuffle.updateHolds(dt)) {
+        const owner = [...playersById.values()].find((x) => x.rag === d.holder);
+        const oid = owner ? owner.id : null;
+        const tp = d.target.pelvis.position;
+        const mine = isMine(d.holder) || isMine(d.target);
+        if (d.kind === "dropped") {
+          // 저절로 풀렸을 때만 소리가 난다 (Q로 놓은 건 위에서 이미 냈다)
+          netSfx("drop", oid, 0.6, 1.2);
+          if (mine) addShake(0.15);
+        } else if (d.kind === "whip") {
+          // 잡은 채로 홱 돌려서 상대를 날렸다 (scuffle.ts SC.WHIP_RATE 주석).
+          // 개인기 소리("trick")를 낮게 깔아 쓴다 - 새 음원을 만들지 않는다.
+          netSfx("trick", oid, 0.6 + d.power * 0.4, 0.6);
+          fx.dash(tp.x, tp.z, d.target.pelvis.velocity.x, d.target.pelvis.velocity.z);
+          if (d.down) {
+            // 너무 급하게 돌려서 손에서 놓쳤다 = 상대는 넘어져 날아간다
+            netSfx("hit", oid, 0.9, 0.8);
+            fx.kick(tp.x, tp.y, tp.z, 0.9);
+            addShake(isMine(d.target) ? 0.9 : 0.4);
+            if (!dramaLine("scuffle", WHIP_LINES, 5)) showMove("던지기", "잡고 홱 돌리면 날아간다");
+          } else if (mine) {
+            addShake(0.25 + d.power * 0.3);
+          }
+        } else {
+          // 서로 잡았다 - 줄다리기 (scuffle.ts SC.GRAB_TUG 주석)
+          netSfx("pickup", oid, 0.7, 0.6);
+          if (mine) {
+            addShake(0.2);
+            if (!dramaLine("scuffle", TUG_LINES, 6)) showMove("줄다리기!", "서로 잡았다 — 먼저 방향을 바꾸는 쪽이 이긴다");
+          }
+        }
+      }
       updatePlayerBumps(dt);
       const hits = [...hazards.update(dt, rags), ...obHits];
       for (const hit of hits) {
@@ -2893,6 +3387,7 @@ function animate() {
 
   // 목표/출구 마커 애니메이션 + 상단 HUD (렌더 직전, 물리와 무관)
   game.render(frameDt);
+  updateBgmForPhase();
 
   renderer.render(scene, camera);
 
@@ -2927,8 +3422,10 @@ function beginSession() {
   for (const id of [myId, ...net.peers].sort((a, b) => a - b)) spawnPlayer(id);
   setAuthority(net.isHost);
   spawnBots();
+  attachBallSfx();
   startCountdown();
-  sfx.music(true);
+  // 경기 BGM은 카운트다운 "GO!" 에서 시작된다 (updateCountdown).
+  // 메뉴 BGM은 그때까지 계속 흐른다.
 
   // 게임 화면으로 넘어왔으니 목표바와 조작 안내를 띄운다.
   // (디버그 HUD는 기본으로 감춰 둔다 - H로 켠다)
@@ -2989,6 +3486,9 @@ if (DEBUG) {
       id: e.id,
       pelvis: e.rag.pelvis.position.toArray(),
       state: e.rag.state,
+      /** 상체가 얼마나 서 있나 (1=똑바로, 0=옆으로, 음수=뒤집힘). 발차기 검증용 */
+      tilt: e.rag.torso.quaternion.vmult(new CANNON.Vec3(0, 1, 0)).y,
+      spin: e.rag.torso.angularVelocity.length(),
       grounded: e.rag.grounded,
       group: e.rag.pelvis.collisionFilterGroup,
       mask: e.rag.pelvis.collisionFilterMask,
@@ -3008,6 +3508,24 @@ if (DEBUG) {
     pressE: () => { grabEdge = true; },
     pressTrick: () => { trickEdge = true; },
     pressKick: () => { kickEdge = true; },
+    /** Q (스톱턴 / 잡기). 키 핸들러와 같은 엣지를 세운다 */
+    pressQ: () => { stopEdge = true; },
+    /** 지금 성립한 몸싸움 상태 - 2인 검증에서 양쪽 화면이 같은지 보는 용도 */
+    scuffle: () => ({
+      holds: scuffle.pairs().map((p) => {
+        const h = [...playersById.values()].find((x) => x.rag === p.holder);
+        const t = [...playersById.values()].find((x) => x.rag === p.target);
+        return { holder: h ? h.id : null, target: t ? t.id : null };
+      }),
+      shoved: [...playersById.values()]
+        .filter((e) => scuffle.shoveDir(e.rag) !== null).map((e) => e.id),
+      immune: [...playersById.values()]
+        .filter((e) => scuffle.isImmune(e.rag)).map((e) => e.id),
+      // 서로 잡고 버티는 중인 사람들 (줄다리기)
+      tug: scuffle.tugPairs()
+        .map((r) => [...playersById.values()].find((x) => x.rag === r)?.id)
+        .filter((v): v is number => v !== undefined),
+    }),
     /** 봇을 원하는 마리 수만큼 다시 세운다 (검증용) */
     setBots: (n: number) => {
       for (const id of [...playersById.keys()]) if (isBot(id)) despawnPlayer(id);
