@@ -1,0 +1,16 @@
+# Render.com Blueprint — Goal Rush! (프론트엔드 + WebSocket 서버를 한 서비스로)
+#
+# 배포:  https://dashboard.render.com  ->  New  ->  Blueprint  ->  이 저장소 연결
+# 이후:  git push 하면 자동 재배포 (autoDeploy)
+#
+# 무료 플랜은 15분 무접속 시 절전 -> 다음 접속 시 최초 로딩 ~50초. 그 뒤엔 정상.
+services:
+  - type: web
+    name: goal-rush
+    runtime: node
+    plan: free
+    region: singapore          # 한국에서 가장 가까운 Render 리전
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: node server/server.js
+    healthCheckPath: /
+    autoDeploy: true

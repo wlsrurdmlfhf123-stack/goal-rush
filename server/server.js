@@ -1,4 +1,9 @@
 import { WebSocketServer } from "ws";
+import { createServer } from "node:http";
+import { readFile, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { extname, join, normalize, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT || 8080);
 
@@ -16,9 +21,53 @@ const PORT = Number(process.env.PORT || 8080);
  *
  * [격리] 릴레이는 전부 "그 소켓이 속한 방" 안에서만 일어난다. 다른 코드를 쓴
  * 클라이언트끼리는 입력도 스냅샷도 서로 보이지 않는다.
+ *
+ * [배포] 하나의 HTTP 서버가 두 가지를 같이 한다:
+ *  - `GET *`     -> ../dist 의 빌드된 프론트엔드를 서빙 (SPA 폴백 = index.html)
+ *  - `Upgrade`   -> WebSocket 릴레이 (경로 무관 - 쿼리스트링만 본다)
+ * 그래서 프론트와 WS 가 **같은 origin/포트 하나**로 나간다. 클라이언트는
+ * `wss://<host>/ws` 로 붙고(ws-url.ts), Render 같은 PaaS 가 주는 PORT 하나만
+ * 열면 된다. dist 가 없으면(테스트 등) 정적 서빙만 건너뛰고 WS 는 그대로 돈다.
  */
 
-const wss = new WebSocketServer({ port: PORT });
+const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
+const SEP = process.platform === "win32" ? "\\" : "/";
+const MIME = {
+  ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript",
+  ".css": "text/css", ".json": "application/json", ".map": "application/json",
+  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+  ".svg": "image/svg+xml", ".ico": "image/x-icon", ".webp": "image/webp",
+  ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".txt": "text/plain; charset=utf-8",
+};
+
+async function serveStatic(req, res) {
+  if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405); return res.end(); }
+  if (!existsSync(DIST)) { res.writeHead(503, { "content-type": "text/plain" }); return res.end("build missing - run `npm run build`"); }
+  let p = decodeURIComponent((req.url || "/").split("?")[0]);
+  if (p === "/" || p === "") p = "/index.html";
+  const rel = normalize(p).replace(/^([/\\]|\.\.[/\\])+/, "");
+  let file = join(DIST, rel);
+  if (file !== DIST && !file.startsWith(DIST + SEP)) { res.writeHead(403); return res.end(); }
+  try {
+    let s = existsSync(file) ? await stat(file) : null;
+    if (!s || s.isDirectory()) { file = join(DIST, "index.html"); s = existsSync(file) ? await stat(file) : null; }
+    if (!s) { res.writeHead(404, { "content-type": "text/plain" }); return res.end("not found"); }
+    const body = await readFile(file);
+    res.writeHead(200, {
+      "content-type": MIME[extname(file).toLowerCase()] || "application/octet-stream",
+      "content-length": body.length,
+      "cache-control": file.endsWith("index.html") ? "no-cache" : "public, max-age=3600",
+    });
+    res.end(req.method === "HEAD" ? undefined : body);
+  } catch { res.writeHead(500); res.end("error"); }
+}
+
+const httpServer = createServer((req, res) => { void serveStatic(req, res); });
+const wss = new WebSocketServer({ noServer: true });
+httpServer.on("upgrade", (req, socket, head) => {
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+});
 
 /**
  * @typedef {{ id:number, ws:import('ws').WebSocket, room:string, preset:number|null }} Player
@@ -243,4 +292,6 @@ wss.on("connection", (ws, req) => {
   ws.on("error", (e) => log(`[${player.room}] player ${id} socket error: ${e.message}`));
 });
 
-wss.on("listening", () => log(`listening on ws://0.0.0.0:${PORT}`));
+httpServer.listen(PORT, () => {
+  log(`listening on :${PORT} (ws relay${existsSync(DIST) ? " + static frontend" : " — no dist, WS only"})`);
+});

@@ -1,0 +1,12 @@
+# dependencies — 배포 시 `npm install` 이 새로 받는다 (플랫폼별 네이티브 바이너리)
+node_modules/
+
+# 빌드 산출물 — 배포 시 `npm run build` 가 새로 만든다
+dist/
+
+# 테스트 번들러(esbuild) 출력
+test/.build/
+
+# 로컬 도구 캐시
+.vite/
+*.log
