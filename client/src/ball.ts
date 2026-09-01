@@ -289,6 +289,48 @@ export const B = {
   /** 재사용 대기 시간 (초) */
   kickCooldown: 0.55,
 
+  // ---- 멈춰 있는 공을 찰 때의 보정 (HANDOFF B5)
+  //
+  // [무엇이 문제였나 — 실측] 같은 풀차지 킥인데
+  //   드리블 중인 공 (4.51 m/s로 굴러가는 중) -> 13.89 m/s
+  //   멈춰 있는 공                            ->  9.63 m/s
+  // 로 **멈춰서 자세 잡고 세게 차는 쪽이 더 약했다.** 이론값은 15.5/1.1 =
+  // 14.1인데, 바닥에 붙어 자고 있는 공은 첫 스텝의 접촉 마찰과 접촉 방정식이
+  // 충격량을 크게 먹는다. 그래서 "세트피스 슛"이라는 플레이가 성립하지 않았다.
+  //
+  // [왜 kickForwardMax 를 올리지 않는가] 그러면 드리블 중인 공까지 같이
+  // 세져서 이미 사람을 넘어뜨리는(13 m/s) 킥이 더 세진다. 문제는 세기가
+  // 아니라 **접촉이 먹는 몫**이므로, 느린 공에만 그만큼을 되돌려 준다.
+  //
+  // 기존 상수(kickForwardMin/Max/UpMin/UpMax)는 **한 개도 안 바꿨다.**
+  /** 이 속도 미만이면 "멈춰 있는 공"으로 본다 (m/s) */
+  slowKickAt: 1.6,
+  /**
+   * 멈춘 공에 곱하는 앞 방향 배수 (1.0 = 보정 없음).
+   *
+   * [1.35를 고른 근거 — 헤드리스 rig 실측]
+   * ```
+   *   배수     정지한 공 [톡 / 반 / 풀]        드리블 중 풀차지
+   *   1.00     3.73 / 6.31 /  8.89            13.50   (보정 전)
+   *   1.25     4.66 / 7.88 / 11.85            13.50
+   *   1.35     5.03 / 8.51 / 13.26            13.50   <- 채택
+   *   1.50     5.59 / 9.46 / 15.37            13.50
+   * ```
+   * 목표는 "정지 킥이 드리블 킥보다 세지는 것"이 **아니라** 비슷해지는 것이다.
+   * 1.5로 올리면 세워 놓고 차는 쪽이 더 강해져서 이번엔 반대로 기울고, 게다가
+   * 사람을 넘어뜨리는 문턱(13 m/s)을 톡 차기만 해도 넘길 위험이 생긴다.
+   * 1.35는 풀차지 13.26 ≈ 드리블 13.50으로, 둘 중 무엇을 골라도 손해가 없다.
+   *
+   * 드리블 중인 공의 값이 표 전체에서 13.50으로 **한 번도 안 변한다** — 이
+   * 보정이 느린 공에만 걸린다는 증거다 (test:ball 이 이걸 잠근다).
+   *
+   * [공을 들어 올리는 방법은 버렸다] 첫 스텝의 접촉을 피하려고 공을 0.04m
+   * 띄워 봤더니 같은 배수에서 8.89 -> 14.09가 됐다. 세기가 아니라 접촉이
+   * 있고 없고로 결과가 갈리므로, 공이 놓인 자리에 따라 킥이 롤러코스터처럼
+   * 달라진다. 예측 가능한 쪽(배수)만 남긴다.
+   */
+  slowKickBoost: 1.35,
+
   // ---- 러시 (F를 공이 사거리 밖일 때 눌렀을 때)
   //
   // [왜 필요한가 — 실측] 공을 놓치면 할 수 있는 게 "달려가기" 하나뿐이었다.
@@ -872,8 +914,17 @@ export function createBallPlay() {
     if (Math.hypot(dx, dz) > B.kickRange) return null;
 
     const k = Math.max(0, Math.min(1, power));
-    const fwd = B.kickForwardMin + (B.kickForwardMax - B.kickForwardMin) * k;
+    let fwd = B.kickForwardMin + (B.kickForwardMax - B.kickForwardMin) * k;
     const up = B.kickUpMin + (B.kickUpMax - B.kickUpMin) * k;
+
+    // 멈춰 있는 공은 접촉이 충격량을 크게 먹는다 (B.slowKickAt 주석의 실측).
+    // 그 몫만 되돌려 준다 - 굴러가는 공의 킥은 예전과 한 뉴턴도 다르지 않다.
+    const ballSpeed = Math.hypot(ball.velocity.x, ball.velocity.z);
+    if (ballSpeed < B.slowKickAt) {
+      // 느릴수록 많이 보정한다 (문턱에서 갑자기 세지지 않게 선형으로 잇는다)
+      const t = 1 - ballSpeed / B.slowKickAt;
+      fwd *= 1 + (B.slowKickBoost - 1) * t;
+    }
 
     const dir = aiming(rag);
     ball.applyImpulse(new CANNON.Vec3(dir.x * fwd, up, dir.z * fwd));

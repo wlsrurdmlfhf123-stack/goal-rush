@@ -80,6 +80,12 @@ interface Fixture {
   resets: { n: number };
   remoteRestarts: { n: number };
   authority: { on: boolean };
+  /** 협동 골 규칙: 지금 골이 인정되는가 (main.ts isGoalValid 를 흉내낸다) */
+  goalOk: { on: boolean };
+  /** 인정되지 않아 되돌린 횟수 */
+  rejects: { n: number };
+  /** 체크포인트 번호 (host 가 정하고 스냅샷으로 나른다) */
+  checkpoint: { n: number };
   /** 고정 timestep으로 sec초만큼 게임을 진행시킨다 */
   run(sec: number): void;
 }
@@ -107,15 +113,23 @@ function fixture(isHost = true): Fixture {
   const remoteRestarts = { n: 0 };
   const authority = { on: isHost };
 
+  const goalOk = { on: true };
+  const rejects = { n: 0 };
+  const checkpoint = { n: -1 };
+
   const game = createGame(world, {
     isAuthority: () => authority.on,
     resetWorld: () => { resets.n++; body.position.set(0, 1.1, -4); },
     requestRestartRemote: () => { remoteRestarts.n++; },
+    isGoalValid: () => goalOk.on,
+    onGoalRejected: () => { rejects.n++; body.position.set(GOAL_X, 1.1, GOAL_Z + 4.5); },
+    checkpoint: () => checkpoint.n,
+    setCheckpoint: (n) => { checkpoint.n = n; },
   });
 
   const DT = 1 / 60;
   return {
-    game, body, resets, remoteRestarts, authority,
+    game, body, resets, remoteRestarts, authority, goalOk, rejects, checkpoint,
     run(sec: number) {
       const steps = Math.round(sec / DT);
       for (let i = 0; i < steps; i++) { game.update(DT); game.render(DT); }
@@ -281,6 +295,74 @@ console.log("\n--- TEST 8: host 이양 ---");
   check("이양받으면 마지막으로 받은 시간에서 이어서 센다", Math.abs(t - 95) < 0.2, `t=${t}`);
   crossGoal(f);
   check("이양 뒤에는 스스로 판정한다", f.game.phase === "success", f.game.phase);
+}
+
+console.log("\n--- TEST 9: 협동 골 (둘 다 공을 건드려야 인정) ---");
+{
+  // [game.ts 는 규칙을 모른다] 여기서 하는 것은 골라인 통과라는 기하학뿐이고,
+  // "인정되는가"는 훅으로 물어본다 (누가 언제 공을 건드렸는지는 래그돌과 공을
+  // 가진 main.ts 만 안다). 그 계약이 지켜지는지를 검사한다.
+  const f = fixture();
+  f.goalOk.on = false;
+  crossGoal(f);
+  check("인정 안 되면 성공이 아니다", f.game.phase === "playing", f.game.phase);
+  check("거절 훅이 불린다 (공을 되돌릴 기회를 준다)", f.rejects.n === 1, `${f.rejects.n}회`);
+
+  // 조건이 채워지면 (친구가 공을 건드리면) 그 다음 골은 들어간다
+  f.goalOk.on = true;
+  crossGoal(f);
+  check("인정되면 성공한다", f.game.phase === "success", f.game.phase);
+  check("인정된 골에는 거절 훅이 안 불린다", f.rejects.n === 1, `${f.rejects.n}회`);
+}
+{
+  // 훅을 아예 안 주면 예전 그대로 전부 인정된다 (기존 스테이지가 안 바뀐다)
+  const scene = new THREE.Scene();
+  const body = new CANNON.Body({
+    mass: 20, shape: new CANNON.Box(new CANNON.Vec3(0.6, 1.1, 0.5)),
+    position: new CANNON.Vec3(0, 1.1, -4),
+  });
+  const world = {
+    scene,
+    objectById: new Map([[TARGET_ID, { id: TARGET_ID, mesh: new THREE.Group(), body, grabRadius: 2.4, mass: 20 }]]),
+    mapIndex: 0, map: RULE_MAPS[0], mapCount: RULE_MAPS.length,
+    loadMap: () => {}, onMapLoaded: () => {},
+  } as unknown as World;
+  const g = createGame(world, {
+    isAuthority: () => true,
+    resetWorld: () => {},
+    requestRestartRemote: () => {},
+  });
+  const DT = 1 / 60;
+  body.position.set(GOAL_X, 1.1, GOAL_Z + 1.5); g.update(DT);
+  body.position.set(GOAL_X, 1.1, GOAL_Z - 0.5); g.update(DT);
+  check("협동 골 훅이 없으면 예전 그대로 인정된다", g.phase === "success", g.phase);
+}
+
+console.log("\n--- TEST 10: 체크포인트가 스냅샷으로 나른다 ---");
+{
+  // 판정은 main.ts 가 한다(사람이 **전부** 그 선을 넘었는가). game.ts 는 그
+  // 결과를 스냅샷에 싣고, 받는 쪽에 그대로 넘겨주기만 한다 — 한쪽 화면에서만
+  // 체크포인트가 잡히는 일이 없어야 하기 때문이다.
+  const host = fixture(true);
+  check("처음엔 없다 (-1)", host.game.snapshot().c === -1, `${host.game.snapshot().c}`);
+  host.checkpoint.n = 1;
+  check("host 가 정한 값이 스냅샷에 실린다", host.game.snapshot().c === 1, `${host.game.snapshot().c}`);
+
+  const guest = fixture(false);
+  guest.game.applyRemote(host.game.snapshot());
+  check("비-host 가 그 값을 그대로 받는다", guest.checkpoint.n === 1, `${guest.checkpoint.n}`);
+
+  // host 는 자기 계산이 우선이다 (남이 보낸 값에 안 흔들린다)
+  const other = fixture(true);
+  other.checkpoint.n = 0;
+  other.game.applyRemote({ phase: "playing", t: 100, m: 0, c: 2 });
+  check("host 는 남이 보낸 체크포인트를 안 받는다", other.checkpoint.n === 0, `${other.checkpoint.n}`);
+
+  // 옛 클라이언트(c 없음)가 보내도 안 깨진다
+  const old = fixture(false);
+  old.checkpoint.n = 1;
+  old.game.applyRemote({ phase: "playing", t: 50, m: 0 });
+  check("c 가 없는 스냅샷은 값을 안 건드린다", old.checkpoint.n === 1, `${old.checkpoint.n}`);
 }
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);

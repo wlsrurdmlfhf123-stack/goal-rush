@@ -48,6 +48,25 @@ export interface GameHooks {
   requestNextMapRemote?(): void;
   /** 지금 공을 누가 들고 있는가 (들고 들어가는 건 골이 아니다) */
   isBallCarried?(): boolean;
+  /**
+   * 골라인을 넘은 이 공이 **인정되는가** (협동 골 규칙).
+   *
+   * [왜 game.ts가 규칙을 안 갖는가] "둘 다 공을 건드렸나"를 알려면 누가 언제
+   * 공을 찼는지를 봐야 하는데, 그건 래그돌과 공을 소유한 main.ts만 안다.
+   * 여기서는 골라인 통과라는 **기하학**만 판정하고, 인정 여부는 물어본다.
+   * 훅이 없으면 예전 그대로 전부 인정된다.
+   */
+  isGoalValid?(): boolean;
+  /** 골라인은 넘었지만 인정되지 않았다 (공을 되돌리고 이유를 알려주는 몫) */
+  onGoalRejected?(): void;
+  /**
+   * 체크포인트 번호를 주고받는다 (host가 정하고 비-host가 받는다).
+   *
+   * 상태를 game.ts가 갖지 않는 이유는 위와 같다 — 판정에 필요한 사람 위치를
+   * main.ts가 갖고 있다. 여기는 **스냅샷에 실어 나르기만** 한다.
+   */
+  checkpoint?(): number;
+  setCheckpoint?(n: number): void;
   /** 골이 들어간 순간 (연출/사운드용) */
   onGoal?(): void;
   /** 실패한 순간 */
@@ -350,6 +369,13 @@ export function createGame(world: World, hooks: GameHooks): Game {
     if (targetBody.position.y > GOAL_MAX_Y) return false;
     // 안고 들어가는 건 골이 아니다
     if (hooks.isBallCarried?.()) return false;
+    // 협동 골 스테이지: 둘 다 공을 건드렸어야 한다.
+    // 넘어온 것 자체는 사실이므로 그 처리(공 되돌리기 · 이유 알리기)를 맡기고
+    // 성공으로는 세지 않는다.
+    if (hooks.isGoalValid && !hooks.isGoalValid()) {
+      hooks.onGoalRejected?.();
+      return false;
+    }
     return true;
   }
 
@@ -515,12 +541,18 @@ export function createGame(world: World, hooks: GameHooks): Game {
     restart,
     nextMap,
     snapshot(): GameSnapshot {
-      return { phase, t: Math.round(timeLeft * 10) / 10, m: world.mapIndex };
+      return {
+        phase, t: Math.round(timeLeft * 10) / 10, m: world.mapIndex,
+        c: hooks.checkpoint?.(),
+      };
     },
     applyRemote(s: GameSnapshot) {
       if (hooks.isAuthority()) return;   // host는 자기 계산이 우선
       // host가 맵을 넘겼으면 따라간다
       if (s.m !== undefined && s.m !== world.mapIndex) world.loadMap(s.m);
+      // 체크포인트는 host가 정한 것을 그대로 따른다. 한쪽만 통과한 상태가
+      // 되면 되살아나는 자리가 서로 달라진다.
+      if (s.c !== undefined) hooks.setCheckpoint?.(s.c);
       // [비-host의 "남은 시간"] clearedAt은 host의 update()에서만 채워진다.
       // 그래서 친구 화면에는 결과가 늘 「남은 시간 0:00」으로 떴다 - 위쪽
       // 타이머에는 3:15가 찍혀 있는데 결과창은 0:00이라 서로 어긋났다.

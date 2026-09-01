@@ -332,6 +332,177 @@ export const OB = {
   leverMaxY: 1.5,
   /** 발에서 떨어져도 이 시간 동안은 켜져 있다 (깜빡임 방지) */
   leverGrace: 0.35,
+
+  // ---- 2인 동시 압력판을 만드는 두 파라미터 (lever.latch / holdgate.openTime)
+  //
+  // [왜 새 kind를 안 만들었나] "둘이 동시에 밟아야 열리는 문"은 이미 있는
+  // lever + holdgate(signalAll = 전부 켜져야 열림)로 정확히 표현된다. 없던 것은
+  // 두 가지뿐이었다.
+  //
+  //   1. **동시성**. hold=1(밟는 동안만)이면 사람이 딱 둘일 때 둘 다 발판에
+  //      묶여 아무도 문을 못 지난다. hold=0(한 번 밟으면 유지)으로 두면 이번엔
+  //      한 명이 두 발판을 차례로 밟고 혼자 지나간다 - 협동이 사라진다.
+  //      그래서 "밟고 나서 latch 초 동안만 켜져 있다"를 넣는다. 발판 사이가
+  //      9.2m(±4.6)이고 사람 최고 속도가 4.6 m/s 남짓이라, latch를 2초 아래로
+  //      두면 혼자서는 물리적으로 두 번째 발판에 닿기 전에 첫 신호가 꺼진다.
+  //      = 규칙이 아니라 **거리와 시간**이 혼자 하는 걸 막는다.
+  //   2. **지나갈 시간**. 조건이 만족된 순간부터 openTime 초 동안 열어 두고
+  //      다시 닫는다. 그동안 둘 다 뛰어 들어가야 한다 ("빨리 와!").
+  //      openTime이 없으면(0) 예전 그대로 "신호가 켜져 있는 동안만" 열린다.
+  /** lever.latch 기본값 (초). 0이면 latch 없이 예전 동작 */
+  leverLatch: 0,
+  /** holdgate.openTime 기본값 (초). 0이면 신호가 곧 개폐 */
+  gateOpenTime: 0,
+
+  // ---- 프레스 (press)
+  //
+  // 위에서 내려와 찍고 올라간다. 회전봉/스위퍼가 "옆으로 쓸고 지나가는" 위협인
+  // 반면 이건 **자리를 통째로 잠그는** 위협이다. 아래에 있으면 넘어진다.
+  // popup 과 반대로 위에서 내려오므로 공도 같이 찍혀 튕겨 나간다.
+  pressW: 5.0,
+  pressD: 3.0,
+  /** 판 두께 */
+  pressH: 0.9,
+  /** 다 올라갔을 때 판 밑면의 높이 (사람 키 위) */
+  pressTopY: 4.2,
+  /** 다 내려왔을 때 판 밑면의 높이 (바닥에 거의 붙는다) */
+  pressBottomY: 0.25,
+  /** 한 주기 (초) */
+  pressPeriod: 3.6,
+  /** 그중 내려와 있는 비율 */
+  pressDownFrac: 0.3,
+  /** 오르내리는 속도 (m/s). 내려올 때는 이 값의 pressSlamMul 배 */
+  pressSpeed: 6,
+  /**
+   * 내려올 때의 속도 배수.
+   *
+   * 같은 속도로 오르내리면 "천천히 다가오는 벽"이라 위협이 안 된다. 올라갈
+   * 때는 느긋하게, 내려올 때는 쾅. 대신 내려오는 시간이 짧아지므로 아래에
+   * 있어도 맞고 튕겨 나갈 뿐 갇히지 않는다.
+   */
+  pressSlamMul: 2.2,
+  /**
+   * 프레스에 맞았을 때 튕겨나가는 충격량 / 넘어져 있는 시간.
+   *
+   * [위(Up)가 거리를 정한다 — 실측] 앞으로 미는 힘을 키워도 몸이 땅에
+   * 처박혀 마찰로 에너지를 잃을 뿐이다(HANDOFF 14-4의 발차기 실측과 같은
+   * 현상). 프레스에서도 그대로였다:
+   * ```
+   *   side/up      튕겨 나간 거리
+   *    54 / 20      0.65m   <- 판(반폭 2.6, 반길이 1.5) 밑을 못 벗어난다
+   *    54 / 30      1.32m
+   *    70 / 34      1.93m   <- 채택
+   * ```
+   * 판 밑을 못 벗어나면 다음 주기에 또 맞는다. 쿨다운(2.4초)이 주기(3.6초)보다
+   * 짧아서 실제로 무한 루프가 된다 — `OB.spinY` 주석이 경고한 그 상황이다.
+   * **가장 가까운 가장자리 쪽으로** 밀어내는 것과 같이 써야 성립한다.
+   */
+  pressKnockSide: 70,
+  pressKnockUp: 34,
+  pressKnockdownTime: 1.1,
+  /**
+   * 같은 사람을 다시 찍기까지 (초).
+   *
+   * [범용 쿨다운(2.4)으로는 모자란다] 판이 5.2 x 3.0이고 판정 여유까지 하면
+   * 한가운데서 나가는 데 1.9m가 필요한데, 넉백으로 실제로 가는 거리는
+   * 1.5m 남짓이다(위 표). 즉 **한 번 맞으면 판정 범위 안에 남는다.**
+   * 주기(3.6초)보다 쿨다운이 길어야 다음 주기를 한 번 거른다 —
+   * 넘어져 있는 1.1초 + 일어나는 시간을 빼고도 걸어 나갈 여유가 2초쯤 생긴다.
+   * 이걸 주기보다 짧게 되돌리면 `OB.spinY` 주석의 무한 루프가 그대로 재현된다.
+   */
+  pressHitCooldown: 4.2,
+
+  // ---- 둘이 밀어야 움직이는 문 (pushblock)
+  //
+  // [왜 DYNAMIC 이 아닌가] 무거운 DYNAMIC 상자를 15바디 래그돌 둘이 동시에
+  // 밀면 접촉 방정식이 30개 넘게 한 물체에 걸린다. platform 주석이 적어 둔
+  // 것과 같은 부류의 불안정이고, 실제로 solver iterations 22 로도 상자가
+  // 파고들었다 튀는 그림이 나온다. 그래서 KINEMATIC 으로 두되
+  //
+  //   · **실제 접촉이 있어야** 미는 사람으로 센다 (proximity 가 아니다.
+  //     physics.contacts 를 읽는다 - platform 의 ridersOf 와 같은 방식)
+  //   · 그 사람이 **상자 쪽으로 걸어가고 있어야** 한다 (rag.intentX/intentZ)
+  //   · 미는 힘의 합이 정지 마찰(pushBreak)을 넘어야 비로소 움직인다
+  //
+  // 로 한다. 혼자면 힘의 합이 문턱 아래라 **정말로 안 움직이고**, 둘이 붙으면
+  // 넘어서 밀린다. 손을 떼는 순간 선다. 상자는 KINEMATIC 이라 무한질량이므로
+  // 사람은 그대로 막히고 밀려난다 = 몸으로 미는 감각은 그대로다.
+  /** 상자 크기 기본값 */
+  pushW: 4.4,
+  pushH: 2.2,
+  pushD: 1.4,
+  /** 사람 하나가 내는 밀기 힘 (임의 단위 - pushBreak 와 같은 저울) */
+  pushForcePer: 100,
+  /**
+   * 정지 마찰. 이 값을 넘는 힘이 걸려야 움직이기 시작한다.
+   *
+   * 150 이면 한 사람(100)으로는 절대 못 넘고 둘(200)이면 넘는다. 셋이 붙으면
+   * 더 빨라진다 - "많이 붙을수록 빠르다"가 자연스럽게 나온다.
+   */
+  pushBreak: 150,
+  /** (합력 - 정지마찰) 을 속도로 바꾸는 계수 (m/s per force) */
+  pushGain: 0.012,
+  /** 최대 이동 속도 (m/s) */
+  pushMaxSpeed: 1.4,
+  /** 접촉으로 잡은 미는 사람을 이 시간 동안은 계속 미는 것으로 본다 (초) */
+  pushGrace: 0.2,
+  /** 이동 입력이 상자 쪽을 향하는 정도가 이 값을 넘어야 미는 것으로 친다 */
+  pushAimDot: 0.35,
+
+  // ---- 빙판 (ice)
+  //
+  // [왜 마찰 계수를 못 바꾸나] cannon 의 마찰은 재질 쌍(ContactMaterial)에
+  // 붙어 있어서 "이 구역만" 바꿀 수 없고, 게다가 사람은 control() 의 속도
+  // 서보가 마찰과 무관하게 최대 49 m/s^2 로 제동을 건다(HANDOFF 5절).
+  // 그래서 마찰을 만지는 길은 사람에게 아무 효과가 없다.
+  //
+  // 대신 **직전 속도를 되돌려 준다**. 이번 스텝에 서보가 지운 속도의 일부를
+  // 충격량으로 다시 넣으면 "브레이크가 안 듣는다"가 된다. 이동 입력은 한 줄도
+  // 안 건드리므로 control() 은 그대로다.
+  /** 직전 스텝 속도를 얼마나 되돌리는가 (0 = 없음, 1 = 완전히 미끄러움) */
+  iceSlip: 0.82,
+  /** 한 스텝에 되돌릴 수 있는 속도 변화의 상한 (m/s). 관절이 놀라지 않게 */
+  iceMaxDv: 0.9,
+  /** 빙판 구역 기본 크기 */
+  iceW: 12,
+  iceD: 12,
+  /** 공이 빙판 위에 있는 동안 쓸 감쇠 (평소보다 훨씬 작다 = 계속 굴러간다) */
+  iceBallDamp: 0.002,
+  iceBallAngDamp: 0.02,
+
+  // ---- 범퍼 (bumper)
+  //
+  // 닿으면 반사한다. 공은 예상 못 한 쪽으로 튀고, 사람도 밀려난다.
+  // 파티클/소리는 main.ts 가 기존 배관으로 붙인다.
+  bumperR: 1.1,
+  bumperH: 1.3,
+  /** 공에 주는 반사 속도 (m/s) */
+  bumperBall: 11,
+  /** 사람에게 주는 반사 충격량 / 위로 */
+  bumperPush: 46,
+  bumperUp: 12,
+  /** 같은 대상을 다시 튕기기까지 (초) */
+  bumperCooldown: 0.45,
+  /**
+   * 이 속도 이상으로 들이받았을 때만 사람이 넘어진다 (m/s).
+   *
+   * 걸어가다 스치는 것까지 넘어뜨리면 범퍼가 그냥 함정이 된다. 달려와서
+   * 박았을 때(사람 최고 속도 4.6)만 날아가게 잡는다.
+   */
+  bumperKnockAt: 3.4,
+  bumperKnockdownTime: 0.8,
+
+  // ---- 점프 패드 (jumppad)
+  //
+  // 밟으면 위로 쏘아 올린다. 공도 같이 뜬다.
+  jumppadR: 1.5,
+  /** 사람이 얻는 위쪽 속도 (m/s) */
+  jumppadUp: 9.5,
+  /** 공이 얻는 위쪽 속도 */
+  jumppadBallUp: 11,
+  /** 이 높이 안에 있어야 밟은 것으로 본다 */
+  jumppadMaxY: 1.6,
+  jumppadCooldown: 0.6,
 };
 
 export type ObstacleKind =
@@ -348,7 +519,12 @@ export type ObstacleKind =
   | "wind"       // 바람 영역 - 안에 있는 동안 한 방향으로 민다 (충돌 없음)
   | "ballsocket" // 공 넣는 장치 - 공이 링 안에 머물면 link 신호를 켠다
   | "lever"      // 레버 - 밟고 있는 동안(또는 한 번 밟으면) link 신호를 켠다
-  | "holdgate";  // 신호 문 - 같은 link 의 스위치가 **전부** 켜져 있어야 열린다
+  | "holdgate"   // 신호 문 - 같은 link 의 스위치가 **전부** 켜져 있어야 열린다
+  | "press"      // 프레스 - 위에서 내려와 찍고 올라간다. 아래 있으면 넘어진다
+  | "pushblock"  // 둘이 붙어서 밀어야 움직이는 무거운 문
+  | "ice"        // 빙판 - 구역 안에서 브레이크가 안 듣는다 (충돌 없음)
+  | "bumper"     // 범퍼 - 닿은 공과 사람을 반사한다
+  | "jumppad";   // 점프 패드 - 밟으면 위로 쏘아 올린다 (충돌 없음)
 
 /** 맵이 선언하는 장애물 */
 export interface ObstacleSpec {
@@ -377,9 +553,14 @@ export interface ObstacleSpec {
    * 값이 둘 이상 필요한 기믹의 파라미터 (maps/gimmicks.ts 의 어휘).
    *   platform : axis(0=x,1=z) span speed w len
    *   conveyor : dirZ speed w len
-   *   wind     : dirX dirZ force w len
-   *   lever    : hold(1=밟는 동안만, 0=한 번 켜면 유지) w len
-   *   holdgate : w h
+   *   wind     : dirX dirZ force w len period onFrac
+   *   lever    : hold(1=밟는 동안만, 0=한 번 켜면 유지) latch w len
+   *   holdgate : w h openTime
+   *   press    : w len period downFrac speed
+   *   pushblock: axis(0=x,1=z) span w h len
+   *   ice      : w len
+   *   bumper   : r
+   *   jumppad  : r up
    */
   params?: Record<string, number>;
 }
@@ -413,6 +594,29 @@ interface Station {
   /** lever - 발에서 떨어진 뒤 남은 유예 (초) / 한 번 켜면 유지되는가 */
   leverGraceT: number;
   leverLatched: boolean;
+  /**
+   * lever - 밟은 뒤 신호가 남아 있는 시간 (초). params.latch 가 있을 때만 쓴다.
+   * 이게 "둘이 **동시에**"를 만든다 (OB.leverLatch 주석 참고).
+   */
+  latchT: number;
+  /** holdgate - openTime 방식에서 남은 개방 시간 (초) */
+  openT: number;
+  /**
+   * holdgate - 다시 열릴 준비가 됐는가.
+   *
+   * openTime 이 끝나 문이 닫힌 뒤, 발판에서 발을 한 번 뗐다가 다시 밟아야
+   * 다음이 열린다. 안 그러면 발판 위에 계속 서 있는 동안 문이 무한히 여닫힌다.
+   */
+  gateArmed: boolean;
+  /** pushblock - 지금 밀고 있는 사람과 남은 유예 (초) / 지금까지 밀려난 거리 */
+  pushers: Map<Ragdoll, number>;
+  pushOff: number;
+  /** bumper / jumppad - 대상별 쿨다운 (초) */
+  bounceCool: Map<CANNON.Body, number>;
+  /** ice - 대상별 직전 스텝의 수평 속도 */
+  iceLast: Map<CANNON.Body, { x: number; z: number }>;
+  /** ice - 공의 원래 감쇠 (구역을 벗어날 때 되돌린다) */
+  iceBallHome: { ld: number; ad: number } | null;
   /** platform - 진행 방향(+1/-1), 양 끝 정지 잔여시간, 축/왕복반폭/속도/중심x */
   dir: number;
   holdT: number;
@@ -440,6 +644,26 @@ export interface ObstacleHit {
   rag: Ragdoll;
   dirX: number;
   dirZ: number;
+}
+
+/**
+ * 넉백이 아닌 접촉 사건 — 범퍼에 튕겼다 / 점프 패드를 밟았다.
+ *
+ * [왜 ObstacleHit 에 안 섞었나] main.ts 의 hits 루프는 "장애물에 맞았다"를
+ * 처리한다 — 화면을 크게 흔들고, 안고 있던 공을 놓게 하고, 골 앞이면
+ * "아까비!"를 띄운다. 점프 패드를 밟았다고 공을 떨어뜨리면 안 되고, 공이
+ * 범퍼에 튕긴 것은 **사람에게 일어난 일이 아니다**(rag 가 없다). 그래서
+ * 성격이 다른 이 둘은 따로 내보내고, 연출은 main.ts 가 고른다.
+ */
+export interface ObstacleFx {
+  kind: "bumper" | "jumppad";
+  /** 사람에게 일어난 일이면 그 래그돌, 공이면 null */
+  rag: Ragdoll | null;
+  x: number;
+  y: number;
+  z: number;
+  /** 0..1. 소리 크기와 흔들림에 그대로 쓴다 */
+  power: number;
 }
 
 /**
@@ -481,6 +705,8 @@ function insideBody(b: CANNON.Body, p: CANNON.Vec3): boolean {
 export function createObstacles(world: World, laneHalf: number) {
   let stations: Station[] = [];
   const hitCooldown = new Map<Ragdoll, number>();
+  /** 범퍼/점프패드 사건 대기열. update() 가 채우고 takeFx() 가 비운다 */
+  const fxQueue: ObstacleFx[] = [];
 
   function rebuild() {
     stations = [];
@@ -495,6 +721,11 @@ export function createObstacles(world: World, laneHalf: number) {
         opened: false, forceOpen: false,
         signalOn: false, sockT: 0, sockGraceT: 0,
         leverGraceT: 0, leverLatched: false,
+        latchT: 0, openT: 0, gateArmed: true,
+        pushers: new Map<Ragdoll, number>(), pushOff: 0,
+        bounceCool: new Map<CANNON.Body, number>(),
+        iceLast: new Map<CANNON.Body, { x: number; z: number }>(),
+        iceBallHome: null,
         // platform 파라미터는 맵이 준 params 에서 한 번만 읽어 둔다
         dir: 1, holdT: 0,
         axis: (spec.params?.axis ?? 0) >= 0.5 ? 1 : 0,
@@ -513,6 +744,7 @@ export function createObstacles(world: World, laneHalf: number) {
 
   /** 전부 초기 상태로 되돌린다 */
   function park() {
+    fxQueue.length = 0;
     for (const s of stations) {
       s.clock = s.spec.phase;
       s.cycle = 0;
@@ -524,6 +756,14 @@ export function createObstacles(world: World, laneHalf: number) {
       s.sockGraceT = 0;
       s.leverGraceT = 0;
       s.leverLatched = false;
+      s.latchT = 0;
+      s.openT = 0;
+      s.gateArmed = true;
+      s.pushOff = 0;
+      s.pushers.clear();
+      s.bounceCool.clear();
+      s.iceLast.clear();
+      s.iceBallHome = null;
       s.holdT = 0;
       s.riders.clear();
       const b = s.body;
@@ -587,6 +827,26 @@ export function createObstacles(world: World, laneHalf: number) {
           // 닫힌 자리에서 시작한다. 싱글이면 rebuild 직후 openGate로 열린다.
           b.position.set(0, OB.gateH * 0.5, s.spec.z);
           break;
+        case "press":
+          // 다 올라간 자리에서 시작한다 (phase 만큼 지나면 처음 내려온다)
+          b.position.set(s.px, pressTopCenter(s), s.spec.z);
+          break;
+        case "pushblock": {
+          // 밀리기 전 자리. 축(axis)을 따라 pushOff 만큼 옮겨 놓는다.
+          const ph = (s.spec.params?.h ?? OB.pushH) * 0.5;
+          if (s.axis === 0) b.position.set(s.px, ph, s.spec.z);
+          else b.position.set(s.px, ph, s.spec.z);
+          break;
+        }
+        case "ice":
+          b.position.set(s.px, 0.02, s.spec.z);
+          break;
+        case "bumper":
+          b.position.set(s.px, OB.bumperH * 0.5, s.spec.z);
+          break;
+        case "jumppad":
+          b.position.set(s.px, 0.06, s.spec.z);
+          break;
       }
       b.wakeUp();
     }
@@ -647,6 +907,38 @@ export function createObstacles(world: World, laneHalf: number) {
     return { off: -s.half, dir: 1, holdT: hold - u };
   }
 
+  /**
+   * 프레스 판의 중심 높이 (다 올라갔을 때 / 다 내려왔을 때).
+   *
+   * 맵이 적는 것은 **판 밑면**의 높이다 ("이 아래로 지나갈 수 있나"가 눈에
+   * 보이는 값이라서). 물리 바디는 중심으로 놓이므로 여기서 한 번 변환한다.
+   */
+  const pressH = (s: Station) => s.spec.params?.h ?? OB.pressH;
+  const pressTopCenter = (s: Station) => (s.spec.params?.topY ?? OB.pressTopY) + pressH(s) * 0.5;
+  const pressBottomCenter = (s: Station) => (s.spec.params?.bottomY ?? OB.pressBottomY) + pressH(s) * 0.5;
+
+  /**
+   * 이 바디에 실제로 닿아 있는 래그돌들.
+   *
+   * platform 의 ridersOf 와 같은 방식(physics.contacts)이지만 "위에 올라탔는가"를
+   * 보지 않는다 - pushblock 은 옆에서 미는 것이 정상이기 때문이다.
+   */
+  function touchersOf(body: CANNON.Body, players: Ragdoll[]): Ragdoll[] {
+    const touching = new Set<CANNON.Body>();
+    for (const c of world.physics.contacts) {
+      if (c.bi === body) touching.add(c.bj);
+      else if (c.bj === body) touching.add(c.bi);
+    }
+    if (touching.size === 0) return [];
+    const out: Ragdoll[] = [];
+    for (const rag of players) {
+      for (const bd of rag.bodies) {
+        if (touching.has(bd)) { out.push(rag); break; }
+      }
+    }
+    return out;
+  }
+
   /** link 채널을 켜고 있는 트리거가 하나라도 있는가 */
   function signalActive(ch: number): boolean {
     for (const s of stations) if (s.signalOn && s.spec.link === ch) return true;
@@ -679,6 +971,8 @@ export function createObstacles(world: World, laneHalf: number) {
   }
   function update(dt: number, players: Ragdoll[], ball?: CANNON.Body): ObstacleHit[] {
     const hits: ObstacleHit[] = [];
+    // 이번 스텝의 범퍼/점프패드 사건. main.ts 가 takeFx() 로 가져간다.
+    const fxOut = fxQueue;
 
     for (const [rag, t] of hitCooldown) {
       const nt = t - dt;
@@ -856,7 +1150,21 @@ export function createObstacles(world: World, laneHalf: number) {
           //   · 레버를 hold:0(한 번 밟으면 유지)으로 두거나
           //   · 문을 coopgate(link) 로 바꿔 "하나만 켜져도 열림"으로 쓴다.
           // 레버가 둘 이상이면 싱글에서는 openGate() 가 자동으로 열어 준다.
-          s.opened = s.forceOpen || (s.spec.link !== undefined && signalAll(s.spec.link));
+          const allOn = s.spec.link !== undefined && signalAll(s.spec.link);
+
+          // openTime 방식: 조건이 만족된 **순간** 타이머를 걸고, 그 시간 동안은
+          // 발판에서 내려와도 열려 있다. 그래야 둘 다 뛰어 들어갈 수 있다.
+          // 다 쓰면 닫히고, 발판을 한 번 비웠다 다시 밟아야 재무장된다
+          // (gateArmed - 안 그러면 서 있는 동안 무한히 여닫힌다).
+          const openTime = s.spec.params?.openTime ?? OB.gateOpenTime;
+          if (openTime > 0) {
+            if (allOn && s.gateArmed) { s.openT = openTime; s.gateArmed = false; }
+            if (!allOn) s.gateArmed = true;
+            s.openT = Math.max(0, s.openT - dt);
+            s.opened = s.forceOpen || s.openT > 0;
+          } else {
+            s.opened = s.forceOpen || allOn;
+          }
           if (s.opened) {
             for (const rag of players) {
               if (rag.pelvis.position.z < s.spec.z - OB.gateD) { s.forceOpen = true; break; }
@@ -889,6 +1197,20 @@ export function createObstacles(world: World, laneHalf: number) {
           const momentary = (s.spec.params?.hold ?? 1) >= 0.5;
           if (stepped) { s.leverLatched = true; s.leverGraceT = OB.leverGrace; }
           else s.leverGraceT = Math.max(0, s.leverGraceT - dt);
+
+          // latch > 0 이면 "밟고 나서 latch 초 동안" 켜져 있다.
+          //
+          // 이것이 2인 동시 압력판을 만드는 장치다 (OB.leverLatch 주석).
+          // hold=1 은 발을 떼는 순간 꺼져서 둘 다 발판에 묶이고, hold=0 은
+          // 혼자 두 발판을 차례로 밟게 해준다. 그 사이가 이 값이다 - 발판
+          // 사이 거리를 사람이 latch 초 안에 못 건너면 혼자서는 못 연다.
+          const latch = s.spec.params?.latch ?? OB.leverLatch;
+          if (latch > 0) {
+            if (stepped) s.latchT = latch;
+            else s.latchT = Math.max(0, s.latchT - dt);
+            s.signalOn = s.latchT > 0;
+            break;
+          }
           s.signalOn = momentary ? (stepped || s.leverGraceT > 0) : s.leverLatched;
           break;
         }
@@ -1002,6 +1324,19 @@ export function createObstacles(world: World, laneHalf: number) {
           const wp = s.spec.params ?? {};
           const wHalfW = (wp.w ?? OB.windW) * 0.5;
           const wHalfL = (wp.len ?? OB.windD) * 0.5;
+
+          // ---- 돌풍: period 초마다 onFrac 만큼만 분다
+          //
+          // [왜 켜졌다 꺼지는가] 계속 부는 바람은 결국 "코스가 이만큼 기울어져
+          // 있다"와 같아서, 한 번 요령을 익히면 아무 일도 안 일어난다. 주기가
+          // 있으면 **언제 건너느냐**가 판단이 되고, 둘이 타이밍을 맞추게 된다.
+          // period 가 없으면(0) 예전 그대로 항상 분다.
+          const wPeriod = wp.period ?? 0;
+          if (wPeriod > 0) {
+            const on = ((s.clock % wPeriod) + wPeriod) % wPeriod < wPeriod * (wp.onFrac ?? 0.5);
+            s.signalOn = on;       // 디버그/연출이 "지금 부는가"를 읽을 수 있게
+            if (!on) break;
+          }
           // force 는 사람에게 거는 가속이다. dirX 가 없으면 arg 를 X 방향으로 쓴다.
           const acc = wp.force ?? OB.windAccel;
           const wdx = (wp.dirX ?? s.spec.arg) * acc;
@@ -1038,6 +1373,263 @@ export function createObstacles(world: World, laneHalf: number) {
           if (resting) { s.sockT += dt; s.sockGraceT = OB.sockGrace; }
           else { s.sockT = 0; s.sockGraceT = Math.max(0, s.sockGraceT - dt); }
           s.signalOn = s.sockT >= OB.sockHold || (s.signalOn && s.sockGraceT > 0);
+          break;
+        }
+
+        case "press": {
+          // 사각파로 내려왔다 올라간다. 내려올 때만 빠르다(pressSlamMul).
+          const pp = s.spec.params ?? {};
+          const period = pp.period ?? OB.pressPeriod;
+          const t = ((s.clock % period) + period) % period;
+          const down = t < period * (pp.downFrac ?? OB.pressDownFrac);
+          const targetY = down ? pressBottomCenter(s) : pressTopCenter(s);
+          const speed = (pp.speed ?? OB.pressSpeed) * (down ? OB.pressSlamMul : 1);
+          const dy = targetY - b.position.y;
+          b.velocity.set(0, Math.abs(dy) < 0.05 ? 0 : Math.sign(dy) * speed, 0);
+          b.position.x = s.px;
+          b.position.z = s.spec.z;
+
+          // ---- 피격 판정
+          //
+          // 범용 KNOCKS 판정을 쓰지 않는 이유: 그쪽은 hitMinY(0.62) 위에 골반이
+          // 있어야 맞는데, 프레스는 **바닥까지 내려오는** 물건이라 일어나는
+          // 중인 사람도 짓눌러야 그림이 맞다. 대신 옆으로 크게 튕겨내서
+          // 그 자리에 갇히지 않게 한다 (popup 이 KNOCKS 에서 빠진 것과 같은 걱정).
+          if (b.velocity.y < -0.5) {
+            const halfW = (pp.w ?? OB.pressW) * 0.5;
+            const halfL = (pp.len ?? OB.pressD) * 0.5;
+            for (const rag of players) {
+              if (hitCooldown.has(rag)) continue;
+              const q = rag.pelvis.position;
+              if (Math.abs(q.x - s.px) > halfW + OB.hitPad) continue;
+              if (Math.abs(q.z - s.spec.z) > halfL + OB.hitPad) continue;
+              if (q.y > b.position.y) continue;                 // 판 위는 안 맞는다
+              if (q.y < b.position.y - pressH(s) * 0.5 - 1.4) continue;
+
+              // ---- **가장 가까운 가장자리 쪽으로** 밀어낸다.
+              //
+              // 늘 옆(x)으로만 밀면, 판이 넓고 얕을 때(5.2 x 3.0) 판 밑을 못
+              // 벗어나 다음 주기에 또 맞는다 — 쿨다운(2.4s)이 주기(3.6s)보다
+              // 짧아서 실제로 무한 루프가 됐다. 나가는 데 제일 짧은 축을 고른다.
+              const outX = halfW - Math.abs(q.x - s.px);
+              const outZ = halfL - Math.abs(q.z - s.spec.z);
+              let dirX = 0, dirZ = 0;
+              if (outX <= outZ) dirX = q.x >= s.px ? 1 : -1;
+              else dirZ = q.z >= s.spec.z ? 1 : -1;
+              rag.knockdown(OB.pressKnockdownTime);
+              rag.pelvis.applyImpulse(new CANNON.Vec3(
+                dirX * OB.pressKnockSide, OB.pressKnockUp, dirZ * OB.pressKnockSide,
+              ));
+              rag.pelvis.wakeUp();
+              hitCooldown.set(rag, OB.pressHitCooldown);
+              hits.push({ rag, dirX, dirZ });
+            }
+          }
+          break;
+        }
+
+        case "pushblock": {
+          // ---- 지금 이 상자를 밀고 있는 사람이 몇인가
+          //
+          // 조건 둘을 **동시에** 만족해야 한다.
+          //   1. 실제로 닿아 있다 (physics.contacts - 가까이 있는 것으론 안 된다)
+          //   2. 이동 입력이 상자 쪽을 향한다 (rag.intentX/intentZ)
+          // 2가 없으면 상자에 등을 대고 서 있기만 해도 밀린다.
+          const bp = s.spec.params ?? {};
+          const axis = s.axis;                       // 0 = x축, 1 = z축으로 밀린다
+          const span = bp.span ?? (s.spec.arg || 5);
+          const pushHalfH = (bp.h ?? OB.pushH) * 0.5;
+          if (s.forceOpen) {
+            // 싱글 플레이 처리 (openGate). 혼자서는 원리적으로 못 미는 물건이라
+            // 사람이 한 명이면 끝까지 밀린 자리에 고정해 둔다.
+            s.pushOff = span;
+            s.signalOn = true;
+            b.velocity.setZero();
+            if (axis === 0) b.position.set(s.px + span, pushHalfH, s.spec.z);
+            else b.position.set(s.px, pushHalfH, s.spec.z + span);
+            break;
+          }
+          for (const [rag, t] of s.pushers) {
+            const nt = t - dt;
+            if (nt <= 0) s.pushers.delete(rag);
+            else s.pushers.set(rag, nt);
+          }
+          let sum = 0;   // 밀리는 방향 성분의 합 (+/-)
+          for (const rag of touchersOf(b, players)) {
+            if (rag.state !== "ACTIVE") continue;
+            const want = axis === 0 ? rag.intentX : rag.intentZ;
+            // 상자 쪽으로 향하고 있는가 (사람 -> 상자 방향과 입력의 부호가 같은가)
+            const toBox = axis === 0
+              ? b.position.x - rag.pelvis.position.x
+              : b.position.z - rag.pelvis.position.z;
+            if (Math.abs(want) < OB.pushAimDot) continue;
+            if (Math.sign(want) !== Math.sign(toBox)) continue;
+            s.pushers.set(rag, OB.pushGrace);
+          }
+          for (const rag of s.pushers.keys()) {
+            sum += Math.sign(axis === 0 ? rag.intentX : rag.intentZ) || 0;
+          }
+          const drive = Math.abs(sum) * OB.pushForcePer;
+          // 정지 마찰을 넘어야 비로소 움직인다. 혼자(100)는 못 넘고 둘(200)이면 넘는다.
+          const net = drive - OB.pushBreak;
+          const v = net > 0
+            ? Math.min(OB.pushMaxSpeed, net * OB.pushGain) * Math.sign(sum)
+            : 0;
+          // 왕복 한계 안에서만 움직인다 (밀어서 코스 밖으로 보내지 못하게)
+          let nv = v;
+          if (s.pushOff >= span && v > 0) nv = 0;
+          if (s.pushOff <= -span && v < 0) nv = 0;
+          s.pushOff = Math.max(-span, Math.min(span, s.pushOff + nv * dt));
+          if (axis === 0) {
+            b.velocity.set(nv, 0, 0);
+            b.position.set(s.px + s.pushOff, pushHalfH, s.spec.z);
+          } else {
+            b.velocity.set(0, 0, nv);
+            b.position.set(s.px, pushHalfH, s.spec.z + s.pushOff);
+          }
+          // 얼마나 밀렸는지를 바깥이 읽을 수 있게 해 둔다 (HUD 안내 / 테스트)
+          s.signalOn = Math.abs(s.pushOff) >= span - 0.05;
+          break;
+        }
+
+        case "ice": {
+          // 막지 않는다. 구역 안에 있는 동안 **직전 속도를 되돌려 준다**
+          // = 브레이크와 방향 전환이 안 듣는다 (OB.iceSlip 주석).
+          b.position.set(s.px, 0.02, s.spec.z);
+          b.velocity.setZero();
+          const ip = s.spec.params ?? {};
+          const iHalfW = (ip.w ?? OB.iceW) * 0.5;
+          const iHalfL = (ip.len ?? OB.iceD) * 0.5;
+          const slip = ip.slip ?? OB.iceSlip;
+          const onIce = (x: number, y: number, z: number) =>
+            Math.abs(x - s.px) <= iHalfW && Math.abs(z - s.spec.z) <= iHalfL
+            && y >= -0.5 && y <= 2.4;
+
+          const slide = (body: CANNON.Body) => {
+            const last = s.iceLast.get(body);
+            s.iceLast.set(body, { x: body.velocity.x, z: body.velocity.z });
+            if (!last) return;
+            // 이번 스텝에 줄어든 속도의 slip 만큼을 되돌린다 (늘어난 건 그대로 둔다 -
+            // 빙판이 사람을 가속시키면 안 된다).
+            const back = (cur: number, prev: number) => {
+              if (Math.abs(prev) <= Math.abs(cur) || Math.sign(prev) !== Math.sign(cur || prev)) return 0;
+              const d = (prev - cur) * slip;
+              return Math.max(-OB.iceMaxDv, Math.min(OB.iceMaxDv, d));
+            };
+            const dvx = back(body.velocity.x, last.x);
+            const dvz = back(body.velocity.z, last.z);
+            if (dvx === 0 && dvz === 0) return;
+            body.velocity.x += dvx;
+            body.velocity.z += dvz;
+            body.wakeUp();
+          };
+
+          for (const rag of players) {
+            const q = rag.pelvis.position;
+            if (!onIce(q.x, q.y, q.z)) { for (const bd of rag.bodies) s.iceLast.delete(bd); continue; }
+            // 골반만 미끄러뜨리면 몸이 뒤로 남는다. 러시(ball.ts)와 같은 이유로
+            // 몸 전체에 같은 처리를 한다.
+            for (const bd of rag.bodies) slide(bd);
+          }
+          if (ball) {
+            if (onIce(ball.position.x, ball.position.y, ball.position.z)) {
+              // [이미 빙판 값인 것을 원래 값으로 기억하면 안 된다] 빙판 구역이
+              // 둘 이상 겹치거나 이어져 있으면, 두 번째 구역이 첫 번째가 이미
+              // 낮춰 놓은 감쇠를 "원래 값"으로 저장한다. 그러면 구역을 다
+              // 벗어난 뒤에도 공이 영영 미끄러운 채로 남는다.
+              if (!s.iceBallHome && ball.linearDamping !== OB.iceBallDamp) {
+                s.iceBallHome = { ld: ball.linearDamping, ad: ball.angularDamping };
+              }
+              ball.linearDamping = OB.iceBallDamp;
+              ball.angularDamping = OB.iceBallAngDamp;
+              ball.wakeUp();
+            } else if (s.iceBallHome) {
+              ball.linearDamping = s.iceBallHome.ld;
+              ball.angularDamping = s.iceBallHome.ad;
+              s.iceBallHome = null;
+            }
+          }
+          break;
+        }
+
+        case "bumper": {
+          // 제자리에 선 기둥. 닿은 것을 바깥으로 반사한다.
+          b.position.set(s.px, OB.bumperH * 0.5, s.spec.z);
+          b.velocity.setZero();
+          for (const [bd, t] of s.bounceCool) {
+            const nt = t - dt;
+            if (nt <= 0) s.bounceCool.delete(bd);
+            else s.bounceCool.set(bd, nt);
+          }
+          const r = (s.spec.params?.r ?? OB.bumperR);
+          const fire = (body: CANNON.Body, pad: number): { x: number; z: number } | null => {
+            if (s.bounceCool.has(body)) return null;
+            let dx = body.position.x - s.px;
+            let dz = body.position.z - s.spec.z;
+            const d = Math.hypot(dx, dz);
+            if (d > r + pad || Math.abs(body.position.y - OB.bumperH * 0.5) > OB.bumperH) return null;
+            if (d < 1e-3) { dx = 1; dz = 0; }
+            else { dx /= d; dz /= d; }
+            s.bounceCool.set(body, OB.bumperCooldown);
+            return { x: dx, z: dz };
+          };
+          if (ball) {
+            const n = fire(ball, ball.shapes[0] instanceof CANNON.Sphere
+              ? (ball.shapes[0] as CANNON.Sphere).radius : 0.3);
+            if (n) {
+              ball.velocity.set(n.x * OB.bumperBall, Math.max(2.5, ball.velocity.y), n.z * OB.bumperBall);
+              ball.wakeUp();
+              fxOut.push({ kind: "bumper", rag: null, power: 1,
+                x: ball.position.x, y: ball.position.y, z: ball.position.z });
+            }
+          }
+          for (const rag of players) {
+            const q = rag.pelvis;
+            const n = fire(q, 0.55);
+            if (!n) continue;
+            // [넉다운이 있어야 보인다] 충격량만 주면 control() 의 속도 서보가
+            // 그 자리에서 지운다 (HANDOFF 5절의 「핵심 발견 2」). 그래서 세게
+            // 들이받았을 때만 제어를 잠깐 끊는다 - 그때만 실제로 날아간다.
+            const closing = -(q.velocity.x * n.x + q.velocity.z * n.z);
+            if (closing >= OB.bumperKnockAt) rag.knockdown(OB.bumperKnockdownTime);
+            q.applyImpulse(new CANNON.Vec3(n.x * OB.bumperPush, OB.bumperUp, n.z * OB.bumperPush));
+            q.wakeUp();
+            fxOut.push({ kind: "bumper", rag, power: Math.max(0.2, Math.min(1, closing / 6)),
+              x: q.position.x, y: q.position.y, z: q.position.z });
+          }
+          break;
+        }
+
+        case "jumppad": {
+          // 밟으면 위로. 막지 않는다 (밟고 지나가는 바닥 판이다).
+          b.position.set(s.px, 0.06, s.spec.z);
+          b.velocity.setZero();
+          for (const [bd, t] of s.bounceCool) {
+            const nt = t - dt;
+            if (nt <= 0) s.bounceCool.delete(bd);
+            else s.bounceCool.set(bd, nt);
+          }
+          const jr = s.spec.params?.r ?? OB.jumppadR;
+          const up = s.spec.params?.up ?? OB.jumppadUp;
+          const inPad = (body: CANNON.Body, maxY: number) =>
+            !s.bounceCool.has(body)
+            && Math.hypot(body.position.x - s.px, body.position.z - s.spec.z) <= jr
+            && body.position.y <= maxY;
+          for (const rag of players) {
+            if (!inPad(rag.pelvis, OB.jumppadMaxY)) continue;
+            s.bounceCool.set(rag.pelvis, OB.jumppadCooldown);
+            // 몸 전체를 같이 띄운다. 골반만 쏘면 몸이 뒤로 남아 그대로 자빠진다.
+            for (const bd of rag.bodies) { bd.velocity.y = Math.max(bd.velocity.y, up); bd.wakeUp(); }
+            fxOut.push({ kind: "jumppad", rag, power: 1,
+              x: rag.pelvis.position.x, y: 0.1, z: rag.pelvis.position.z });
+          }
+          if (ball && inPad(ball, 1.2)) {
+            s.bounceCool.set(ball, OB.jumppadCooldown);
+            ball.velocity.y = Math.max(ball.velocity.y, s.spec.params?.up ?? OB.jumppadBallUp);
+            ball.wakeUp();
+            fxOut.push({ kind: "jumppad", rag: null, power: 1,
+              x: ball.position.x, y: ball.position.y, z: ball.position.z });
+          }
           break;
         }
 
@@ -1162,7 +1754,41 @@ export function createObstacles(world: World, laneHalf: number) {
     return out;
   }
 
-  function forget(rag: Ragdoll) { hitCooldown.delete(rag); }
+  function forget(rag: Ragdoll) {
+    hitCooldown.delete(rag);
+    for (const s of stations) { s.pushers.delete(rag); s.riders.delete(rag); }
+  }
+
+  /** 이번에 쌓인 범퍼/점프패드 사건을 가져가고 비운다 (host 전용) */
+  function takeFx(): ObstacleFx[] {
+    if (fxQueue.length === 0) return [];
+    const out = fxQueue.slice();
+    fxQueue.length = 0;
+    return out;
+  }
+
+  /**
+   * 밀어야 하는 문의 현황 (모든 클라이언트에서 읽기 전용).
+   *
+   * done 은 끝까지 밀렸는가다. 상황 안내와 테스트가 이 값을 읽는다.
+   *
+   * [바디 위치에서 다시 계산한다 — 실측으로 찾은 문제]
+   * 처음엔 `s.pushOff`(누적 카운터)와 `s.signalOn`을 그대로 돌려줬다. 그런데
+   * 그 둘은 `update()`가 채우는 값이고 **update()는 host에서만 돈다.** 비-host는
+   * 물리를 안 돌리고 스냅샷으로 바디 위치만 받으므로, 브라우저 2인 검증에서
+   * host는 -2.8m 밀렸다고 하는데 친구 화면은 0으로 나왔다 (문은 실제로 같은
+   * 자리에 그려져 있었다 — 숫자만 틀렸다). 바디 위치는 양쪽에 다 있으므로
+   * 거기서 되계산하면 두 화면이 같은 값을 본다.
+   */
+  function pushBlocks(): { z: number; x: number; off: number; done: boolean }[] {
+    return stations
+      .filter((s) => s.spec.kind === "pushblock")
+      .map((s) => {
+        const span = s.spec.params?.span ?? (s.spec.arg || 5);
+        const off = s.axis === 0 ? s.body.position.x - s.px : s.body.position.z - s.spec.z;
+        return { z: s.spec.z, x: s.px, off, done: Math.abs(off) >= span - 0.05 };
+      });
+  }
 
   /**
    * 협동 게이트를 연다 (host 전용).
@@ -1197,6 +1823,9 @@ export function createObstacles(world: World, laneHalf: number) {
     if (s.spec.kind === "buttongate") return true;
     if (s.spec.kind === "coopgate") return s.spec.link === undefined;   // 패스 게이트
     if (s.spec.kind === "holdgate") return triggerCount(s.spec.link) >= 2;
+    // 밀어야 하는 문은 한 사람 몫의 힘으로는 정지 마찰을 못 넘는다 = 혼자면
+    // 원리적으로 불가능하다. 싱글에서는 끝까지 밀린 자리에 세워 둔다.
+    if (s.spec.kind === "pushblock") return true;
     return false;
   };
 
@@ -1258,6 +1887,6 @@ export function createObstacles(world: World, laneHalf: number) {
   }
 
   return { rebuild, park, update, rollers, signals, signalActive, signalAll, forget, openGate, closedGates, needsSoloOpen,
-    buttonGates, onPad,
+    buttonGates, onPad, takeFx, pushBlocks,
     get stations() { return stations; } };
 }

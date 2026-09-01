@@ -689,6 +689,102 @@ export function createWorld(container: HTMLElement): World {
         position: new CANNON.Vec3(opts?.x ?? 0, gh * 0.5, z),
         material: propMat,
       });
+    } else if (kind === "press") {
+      // 위에서 내려오는 판. 아랫면에 이빨을 달아 "찍는 물건"으로 읽히게 한다.
+      const pw = opts?.params?.w ?? OB.pressW;
+      const pl = opts?.params?.len ?? OB.pressD;
+      const ph = opts?.params?.h ?? OB.pressH;
+      const main = new THREE.Mesh(boxGeo(pw, ph, pl), toyMat(0xff5d73, { rough: 0.42 }));
+      main.castShadow = true; main.receiveShadow = true;
+      g.add(main);
+      for (let k = -2; k <= 2; k++) {
+        const tooth = new THREE.Mesh(boxGeo(pw * 0.14, 0.26, pl * 0.86), toyMat(0xffd166, { rough: 0.35 }));
+        tooth.position.set(k * (pw / 5.2), -ph * 0.5 - 0.1, 0);
+        g.add(tooth);
+      }
+      body = new CANNON.Body({
+        mass: 0, type: CANNON.Body.KINEMATIC,
+        shape: new CANNON.Box(new CANNON.Vec3(pw * 0.5, ph * 0.5, pl * 0.5)),
+        position: new CANNON.Vec3(opts?.x ?? 0, (opts?.params?.topY ?? OB.pressTopY) + ph * 0.5, z),
+        material: propMat,
+      });
+    } else if (kind === "pushblock") {
+      // 둘이 밀어야 움직이는 문. 손자국(밀 자리)을 앞면에 크게 그려 둔다.
+      const bw = opts?.params?.w ?? OB.pushW;
+      const bh = opts?.params?.h ?? OB.pushH;
+      const bl = opts?.params?.len ?? OB.pushD;
+      const main = new THREE.Mesh(boxGeo(bw, bh, bl), toyMat(0x9a6b3f, { rough: 0.72 }));
+      main.castShadow = true; main.receiveShadow = true;
+      g.add(main);
+      // 밀 자리 표시 두 개 — "여기 둘이 붙어라"가 형태로 보여야 한다
+      for (const sx of [-1, 1]) {
+        const grip = new THREE.Mesh(boxGeo(bw * 0.26, bh * 0.34, 0.16), toyMat(0xffd166, { rough: 0.4 }));
+        grip.position.set(sx * bw * 0.24, 0, bl * 0.5 + 0.06);
+        g.add(grip);
+      }
+      body = new CANNON.Body({
+        mass: 0, type: CANNON.Body.KINEMATIC,
+        shape: new CANNON.Box(new CANNON.Vec3(bw * 0.5, bh * 0.5, bl * 0.5)),
+        position: new CANNON.Vec3(opts?.x ?? 0, bh * 0.5, z),
+        material: propMat,
+      });
+    } else if (kind === "ice") {
+      // 빙판. 막지 않는다 — 바닥 위에 얇게 덮인 판이다.
+      const iw = opts?.params?.w ?? OB.iceW;
+      const il = opts?.params?.len ?? OB.iceD;
+      const sheet = new THREE.Mesh(boxGeo(iw, 0.04, il), toyMat(0xbfe9ff, { rough: 0.05, opacity: 0.75 }));
+      sheet.receiveShadow = true;
+      g.add(sheet);
+      // 반짝이는 결 — 멀리서도 "여기 미끄럽다"로 읽히게
+      for (let k = -2; k <= 2; k++) {
+        const shine = new THREE.Mesh(boxGeo(iw * 0.7, 0.05, 0.22), toyMat(0xffffff, { rough: 0.02, opacity: 0.5 }));
+        shine.position.set(k * 0.6, 0.03, k * (il / 6));
+        shine.rotation.y = 0.3;
+        g.add(shine);
+      }
+      body = new CANNON.Body({
+        mass: 0, type: CANNON.Body.KINEMATIC,
+        shape: new CANNON.Box(new CANNON.Vec3(iw * 0.5, 0.02, il * 0.5)),
+        position: new CANNON.Vec3(opts?.x ?? 0, 0.02, z),
+        material: propMat,
+      });
+      body.collisionResponse = false;   // 밀지도 막지도 않는다 - 판정용 구역이다
+    } else if (kind === "bumper") {
+      // 범퍼. 닿으면 튕긴다 - 실제로 막아야 하므로 충돌은 켜 둔다.
+      const br = opts?.params?.r ?? OB.bumperR;
+      const post = new THREE.Mesh(cylGeo(br, br * 0.86, OB.bumperH, 20), toyMat(0xff4fa3, { rough: 0.3 }));
+      post.castShadow = true; post.receiveShadow = true;
+      g.add(post);
+      const cap = new THREE.Mesh(cylGeo(br * 1.06, br * 1.06, 0.18, 20), toyMat(0xffd166, { rough: 0.25 }));
+      cap.position.y = OB.bumperH * 0.5;
+      g.add(cap);
+      body = new CANNON.Body({
+        mass: 0, type: CANNON.Body.KINEMATIC,
+        shape: new CANNON.Cylinder(br, br, OB.bumperH, 12),
+        position: new CANNON.Vec3(opts?.x ?? 0, OB.bumperH * 0.5, z),
+        material: propMat,
+      });
+    } else if (kind === "jumppad") {
+      // 점프 패드. 밟는 판이라 막지 않는다 (lever 와 같은 이유).
+      const jr = opts?.params?.r ?? OB.jumppadR;
+      const pad = new THREE.Mesh(cylGeo(jr, jr, 0.12, 24), toyMat(0x30d6a0, { rough: 0.35 }));
+      g.add(pad);
+      const inner = new THREE.Mesh(cylGeo(jr * 0.62, jr * 0.62, 0.16, 24), toyMat(0xffd166, { rough: 0.3 }));
+      inner.position.y = 0.03;
+      g.add(inner);
+      // 위로 쏜다는 표시 — 얇은 기둥 셋
+      for (let k = 0; k < 3; k++) {
+        const arrow = new THREE.Mesh(boxGeo(jr * 0.5 - k * 0.18, 0.07, 0.16), toyMat(0xffffff, { rough: 0.3, opacity: 0.6 }));
+        arrow.position.y = 0.35 + k * 0.3;
+        g.add(arrow);
+      }
+      body = new CANNON.Body({
+        mass: 0, type: CANNON.Body.KINEMATIC,
+        shape: new CANNON.Cylinder(jr, jr, 0.12, 12),
+        position: new CANNON.Vec3(opts?.x ?? 0, 0.06, z),
+        material: propMat,
+      });
+      body.collisionResponse = false;
     } else {
       const main = new THREE.Mesh(boxGeo(OB.pistonW, OB.pistonH, OB.pistonD), toyMat(0x7c5cff, { rough: 0.4 }));
       main.castShadow = true; main.receiveShadow = true;

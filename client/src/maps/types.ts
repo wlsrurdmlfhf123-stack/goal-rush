@@ -146,6 +146,35 @@ export interface MapDef {
    * 코스 중간쯤에 두어야 출발하자마자 달려들지 않는다.
    */
   botSpawns?: [number, number][];
+  /**
+   * 각 봇의 역할 (botSpawns와 같은 순서, 같은 길이).
+   *
+   * 없거나 짧으면 그 자리는 `bot.ts`의 기본 규칙(`roleForBot`)을 쓴다.
+   * 값은 `BotRole`의 문자열이다 — `"chaser"` / `"blocker"` / `"bruiser"` /
+   * `"thief"`(공을 빼앗아 도망간다). 문자열을 쓰는 이유는 맵 파일이
+   * `bot.ts`를 import 하지 않게 하려는 것이고, main.ts가 `isBotRole`로
+   * 한 번 걸러서 받는다.
+   */
+  botRoles?: string[];
+  /**
+   * 체크포인트의 z 목록 (진행 순서대로, 큰 값 = 출발선 쪽).
+   *
+   * **살아 있는 사람이 전부** 그 z를 지나면 통과로 친다. 한 명만 지나도 되게
+   * 하면 앞선 사람이 계속 저장선을 밀고 나가서, 뒤처진 사람은 매번 혼자
+   * 남겨진 자리에서 되살아난다. 「기다려 줘」가 나오게 하려면 둘 다여야 한다.
+   *
+   * 실패하거나 [다시하기]를 누르면 마지막으로 통과한 체크포인트에서 시작한다
+   * (main.ts `resetWorld` / `checkpointZ`).
+   */
+  checkpoints?: number[];
+  /**
+   * 마지막 골을 협동으로 만들 것인가.
+   *
+   * 켜면 **두 사람이 모두 공을 건드린 직후에만** 골로 인정한다 (main.ts
+   * `ballAssist`). 사람이 하나뿐이면 아무 영향이 없다 — 싱글이 못 깨는
+   * 규칙을 만들지 않는다.
+   */
+  coopGoal?: boolean;
   /** 바닥 렌더 색/크기와 바깥 배경색 */
   floor: {
     size: number;

@@ -3,6 +3,7 @@ import type { MapDef } from "../maps/types";
 import { STAGE1_WARMUP } from "./stage01-warmup";
 import { STAGE2_LEVERS } from "./stage02-levers";
 import { STAGE3_MOVING_FLOOR } from "./stage03-movingfloor";
+import { STAGE4_PUSH } from "./stage04-push";
 import { GIMMICK_LAB } from "./lab";
 import { ARCHIVED_STAGES } from "./archive";
 import { PENDING_GIMMICKS } from "../maps/gimmicks";
@@ -27,6 +28,7 @@ export const STAGES: MapDef[] = [
   STAGE1_WARMUP,
   STAGE2_LEVERS,
   STAGE3_MOVING_FLOOR,
+  STAGE4_PUSH,
 ];
 
 /**

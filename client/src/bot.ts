@@ -118,9 +118,83 @@ export const BOT = {
   tackleImpulse: 26,
   /** 태클 재사용 간격 (초) - 길게 잡아 "가끔" (넘어뜨리기 락 방지) */
   tackleCooldown: 6.5,
+
+  // ---- 공 도둑 (thief)
+  //
+  // [chaser 와 무엇이 다른가] chaser 는 공을 **걷어낸다** - 한 방 차고 끝이다.
+  // thief 는 공을 **가져간다**. 뺏은 뒤 일정 시간 자기 발 앞에 붙여 놓고
+  // 출발선 쪽으로 도망가므로, 둘이 쫓아가서 되찾아야 진행이 된다.
+  // 이게 「야 저 새끼 공 가져갔어!」가 실제로 일어나는 자리다.
+  //
+  // [혼자서는 못 잡는다 — 규칙이 아니라 속도로]
+  // 도둑은 사람과 같은 최고 속도를 쓴다. 뒤에서 쫓아가기만 해서는 영영 못
+  // 따라잡고, 한 명이 앞을 막아 도둑이 방향을 틀 때 다른 한 명이 붙어야
+  // 잡힌다. 봇을 빠르게 만들어서가 아니라 **같은 속도라서** 그렇다.
+  /** 이 거리 안에 공이 들어오면 빼앗는다 */
+  thiefStealDist: 1.5,
+  /** 뺏은 공을 붙들고 있는 시간 (초). 지나면 스스로 놓는다 */
+  thiefFleeTime: 7.0,
+  /**
+   * 뺏은 직후 **도망치지 않고 공을 챙기는** 시간 (초).
+   *
+   * [없으면 뺏자마자 놓친다 — 실측] 도둑은 공을 향해 달려오다 뺏으므로, 뺏은
+   * 순간 진행 방향은 골 쪽(-Z)이고 도망갈 방향은 그 반대(+Z)다. 몸을 반 바퀴
+   * 도는 데 turnRate(3.2 rad/s)로 1초가 걸리는데, 그동안 공은 제자리에 남고
+   * 도둑만 멀어져서 **0.9초 만에 간격이 5.1m**가 됐다(thiefKeepMax 2.6 밖).
+   *
+   * [왜 당기는 힘을 키워 해결하지 않았나] 그러면 사람이 9 m/s로 차낸 공까지
+   * 되잡는 자석이 된다(thiefPull 주석의 표). 그리고 급회전에서 공을 흘리는
+   * 것은 이 게임의 드리블이 원래 그렇다 — 사람도 똑같이 놓친다(ball.ts D2).
+   * 봇에게만 예외를 주는 대신, **회전하는 동안에는 도망가지 않게** 한다.
+   * 이 시간 동안 도둑은 공 쪽을 목표로 삼아 제자리에서 몸을 돌린다.
+   */
+  thiefSettle: 0.9,
+  /** 한 번 놓친 뒤 다시 뺏기까지 (초). 없으면 놓자마자 도로 가져간다 */
+  thiefRegrab: 3.2,
+  /** 공을 발 앞 이 거리에 붙여 놓는다 (m) */
+  thiefKeepAhead: 0.95,
+  /**
+   * 공이 이 거리를 벗어나면 소유권이 끊긴다 (m).
+   *
+   * [자석이 되지 않게 하는 값] 공을 붙드는 것은 아래 thiefPull 의 **가속
+   * 상한**이 전부다. 사람이 킥으로 공을 이 밖으로 보내면 도둑은 그대로
+   * 놓친다 - "뺏긴 공은 되찾을 수 있다"가 성립하는 근거다.
+   */
+  thiefKeepMax: 2.6,
+  /**
+   * 공을 발 앞에 붙들어 두는 가속 상한 (m/s^2).
+   *
+   * [이 값이 「자석이냐 아니냐」를 혼자 결정한다 — 실측]
+   * 소유가 끊기는 조건은 거리(thiefKeepMax = 2.6m)뿐이므로, 도둑이 차인 공을
+   * 2.6m 안에서 되잡을 수 있으면 사람이 아무리 세게 차도 소용이 없다.
+   * 등가속으로 v 를 죽이는 거리가 v^2 / 2a 이므로 **a < v^2 / 5.2** 여야
+   * v m/s 로 찬 공이 달아난다.
+   * ```
+   *   pull   9 m/s 로 찬 공      13 m/s 로 찬 공
+   *    26    되잡힌다 (자석)     달아난다
+   *    14    달아난다            달아난다
+   * ```
+   * 9 m/s 는 반쯤 차징한 킥이다. 그것조차 못 뺏어오면 「되찾을 수 있다」가
+   * 거짓말이 된다. 반대로 너무 낮추면 도둑이 자기 발 앞에 공을 못 붙인다 —
+   * 목표 속도를 도둑 속도(최고 4.6 m/s)에 맞추는 데는 14로도 0.33초면 된다.
+   */
+  thiefPull: 14,
+  /** 위치 오차를 목표 속도로 바꾸는 계수 (1/s). 클수록 공이 발 앞에 딱 붙는다 */
+  thiefKp: 6,
+  /** 도망갈 때 코스 가장자리에서 남기는 여유 (m) */
+  thiefFleeMargin: 2.0,
+  /** 사람이 이 거리 안에서 이 속도 이상으로 부딪히면 공을 떨어뜨린다 */
+  thiefBumpDist: 1.25,
+  thiefBumpSpeed: 2.4,
+  /** 부딪혀 뺏겼을 때 도둑이 넘어져 있는 시간 (초) */
+  thiefBumpKnock: 0.9,
 };
 
-export type BotRole = "chaser" | "blocker" | "bruiser";
+export type BotRole = "chaser" | "blocker" | "bruiser" | "thief";
+
+/** 이름이 맞는 역할인가 (맵이 문자열로 적으므로 한 번 걸러 받는다) */
+const ROLES: ReadonlySet<string> = new Set<BotRole>(["chaser", "blocker", "bruiser", "thief"]);
+export function isBotRole(s: string): s is BotRole { return ROLES.has(s); }
 
 /** bot id(-1, -2, ...) -> 역할. 뒤 번호일수록 방해가 다양해진다 */
 const ROLE_BY_INDEX: BotRole[] = ["chaser", "chaser", "blocker", "bruiser", "chaser", "blocker"];
@@ -152,7 +226,16 @@ interface BotState {
   /** chaser의 태클 쿨다운 */
   tackleTimer: number;
   clock: number;
+  /** thief - 지금 공을 끌고 가는 중인가 / 남은 도주 시간 / 다시 뺏기까지 */
+  owning: boolean;
+  fleeT: number;
+  regrabT: number;
 }
+
+/** 공 도둑이 이번 스텝에 일으킨 사건 (연출·안내를 main.ts 가 붙인다) */
+export type ThiefEvent =
+  | { kind: "stole" }                       // 방금 공을 빼앗았다
+  | { kind: "lost"; by: Ragdoll | null };   // 공을 놓쳤다 (by = 부딪힌 사람)
 
 export interface BotBumpResult {
   /** 캐리를 풀어야 하는 래그돌들 */
@@ -165,7 +248,11 @@ export function createBots(laneHalf: number) {
   function stateOf(rag: Ragdoll): BotState {
     let s = states.get(rag);
     if (!s) {
-      s = { memory: [], dirX: 0, dirZ: -1, stealTimer: 0, bumpTimer: 0, shoveTimer: 0, tackleTimer: 0, clock: 0 };
+      s = {
+        memory: [], dirX: 0, dirZ: -1,
+        stealTimer: 0, bumpTimer: 0, shoveTimer: 0, tackleTimer: 0, clock: 0,
+        owning: false, fleeT: 0, regrabT: 0,
+      };
       states.set(rag, s);
     }
     return s;
@@ -183,7 +270,7 @@ export function createBots(laneHalf: number) {
     ball: CANNON.Body,
     dt: number,
     ctx: BotUpdateCtx,
-  ): { input: RagdollInput; brokeCarry: Ragdoll[]; tackled: Ragdoll[] } {
+  ): { input: RagdollInput; brokeCarry: Ragdoll[]; tackled: Ragdoll[]; thief?: ThiefEvent } {
     const { carriers, humans, goalZ, role } = ctx;
     const s = stateOf(rag);
     s.clock += dt;
@@ -191,18 +278,22 @@ export function createBots(laneHalf: number) {
     s.bumpTimer = Math.max(0, s.bumpTimer - dt);
     s.shoveTimer = Math.max(0, s.shoveTimer - dt);
     s.tackleTimer = Math.max(0, s.tackleTimer - dt);
+    s.regrabT = Math.max(0, s.regrabT - dt);
 
     const brokeCarry: Ragdoll[] = [];
     const tackled: Ragdoll[] = [];
+    let thief: ThiefEvent | undefined;
 
     // ---- 공 위치를 "조금 전 것"으로 기억한다
     s.memory.push({ t: s.clock, x: ball.position.x, z: ball.position.z, vx: ball.velocity.x, vz: ball.velocity.z });
     while (s.memory.length > 2 && s.memory[1].t <= s.clock - BOT.reactionTime) s.memory.shift();
     const seen = s.memory[0];
 
-    // 넘어져 있으면 아무것도 못 한다 (사람과 같다)
+    // 넘어져 있으면 아무것도 못 한다 (사람과 같다).
+    // 도둑이라면 그 순간 공을 놓는다 - **넘어뜨리는 것이 공을 되찾는 방법**이다.
     if (rag.state !== "ACTIVE") {
-      return { input: { moveX: 0, moveZ: 0, jump: false }, brokeCarry, tackled };
+      if (s.owning) { s.owning = false; s.fleeT = 0; s.regrabT = BOT.thiefRegrab; thief = { kind: "lost", by: null }; }
+      return { input: { moveX: 0, moveZ: 0, jump: false }, brokeCarry, tackled, thief };
     }
 
     const p = rag.pelvis.position;
@@ -217,9 +308,122 @@ export function createBots(laneHalf: number) {
     }
     const carrier = carriers.find((c) => c.state === "ACTIVE") ?? null;
 
+    // ---- 공 도둑: 뺏기 / 붙들기 / 놓치기
+    //
+    // 이 블록은 목표 지점을 정하기 **전에** 돌아야 한다. 지금 공을 끌고 가는
+    // 중인지에 따라 어디로 갈지가 통째로 달라지기 때문이다.
+    if (role === "thief" && s.clock >= BOT.spawnGrace) {
+      const bx = ball.position.x - p.x;
+      const bz = ball.position.z - p.z;
+      const bd = Math.hypot(bx, bz);
+
+      if (!s.owning) {
+        // 안고 있는 사람에게서는 못 뺏는다 (그건 bumpDist 쪽 일이다).
+        const heldByHuman = carriers.some((c) => c.state === "ACTIVE");
+        if (!heldByHuman && s.regrabT <= 0 && bd < BOT.thiefStealDist) {
+          s.owning = true;
+          s.fleeT = BOT.thiefFleeTime;
+          thief = { kind: "stole" };
+        }
+      } else {
+        s.fleeT -= dt;
+        // 놓치는 세 가지 경우: 시간이 다 됐다 / 공이 멀리 달아났다 /
+        // 사람이 달려와 부딪혔다.
+        let lostBy: Ragdoll | null | undefined;
+        if (s.fleeT <= 0 || bd > BOT.thiefKeepMax) lostBy = null;
+        if (lostBy === undefined) {
+          for (const h of humans) {
+            if (h.state !== "ACTIVE") continue;
+            const hp = h.pelvis.position;
+            const dx = hp.x - p.x, dz = hp.z - p.z;
+            const d = Math.hypot(dx, dz);
+            if (d > BOT.thiefBumpDist || d < 1e-3) continue;
+            // 서로 다가오는 속도. 그냥 옆에 서 있는 것으로는 안 뺏긴다.
+            const rvx = h.pelvis.velocity.x - rag.pelvis.velocity.x;
+            const rvz = h.pelvis.velocity.z - rag.pelvis.velocity.z;
+            if (-(rvx * (dx / d) + rvz * (dz / d)) < BOT.thiefBumpSpeed) continue;
+            // [상대속도만으로는 부족했다 — 실측] 가만히 선 사람에게 도둑이
+            // 달려와 부딪히기만 해도 상대속도가 문턱을 넘는다. 그러면 길목에
+            // **서 있기만** 해도 공이 돌아오는 셈이라, 「달려가 부딪혀 뺏는다」가
+            // 아니라 「막고 서 있으면 알아서 뺏긴다」가 된다.
+            // 사람 자신도 움직이고 있어야 한다.
+            if (Math.hypot(h.pelvis.velocity.x, h.pelvis.velocity.z) < BOT.thiefBumpSpeed) continue;
+            lostBy = h;
+            break;
+          }
+        }
+        if (lostBy !== undefined) {
+          s.owning = false;
+          s.fleeT = 0;
+          s.regrabT = BOT.thiefRegrab;
+          if (lostBy) {
+            // 부딪혀 뺏겼으면 도둑이 자빠진다 - 그래야 되찾은 게 눈에 보인다
+            rag.knockdown(BOT.thiefBumpKnock);
+            const l = Math.hypot(p.x - lostBy.pelvis.position.x, p.z - lostBy.pelvis.position.z) || 1;
+            rag.pelvis.applyImpulse(new CANNON.Vec3(
+              ((p.x - lostBy.pelvis.position.x) / l) * BOT.tackleImpulse, 10,
+              ((p.z - lostBy.pelvis.position.z) / l) * BOT.tackleImpulse,
+            ));
+            rag.pelvis.wakeUp();
+          }
+          thief = { kind: "lost", by: lostBy };
+        } else {
+          // ---- 공을 발 앞에 붙들어 둔다.
+          //
+          // [위치만 당기면 안 된다 — 실측] 처음엔 목표 지점으로 끌어당기기만
+          // 했다. 그랬더니 도둑이 **뺏자마자 놓쳤다**: 뺏은 자리에서 몸을 돌려
+          // (turnRate 3.2 rad/s = 반 바퀴에 1초) 반대쪽으로 달아나는 동안 공은
+          // 제자리에 남고, 도둑만 4.6 m/s로 멀어져서 0.9초 만에 간격이 6m가
+          // 됐다(thiefKeepMax 2.6 밖). 위치 오차만 보는 힘은 **도둑이 이미
+          // 내고 있는 속도를 모른다.**
+          //
+          // 그래서 속도까지 맞춘다: 목표 속도 = 도둑의 속도 + 위치 오차 보정.
+          // 공이 도둑과 같은 속도로 움직이는 것이 기본이고, 어긋난 만큼만
+          // 더 당긴다.
+          //
+          // [자석이 아니다] 가속에는 상한(thiefPull)이 있고, 사람이 킥으로 공을
+          // thiefKeepMax 밖으로 보내면 위에서 소유권이 끊긴다. 풀차지 킥이
+          // 13 m/s인데 이 상한으로는 그걸 따라잡을 수 없다 — 힘이 아니라
+          // 거리로 결판난다.
+          const tX = p.x + s.dirX * BOT.thiefKeepAhead;
+          const tZ = p.z + s.dirZ * BOT.thiefKeepAhead;
+          const wantVx = rag.pelvis.velocity.x + (tX - ball.position.x) * BOT.thiefKp;
+          const wantVz = rag.pelvis.velocity.z + (tZ - ball.position.z) * BOT.thiefKp;
+          let ax = wantVx - ball.velocity.x;
+          let az = wantVz - ball.velocity.z;
+          const ad = Math.hypot(ax, az);
+          if (ad > 1e-3) {
+            // 가속 상한 안에서만 당긴다 (a = min(pull, ad/dt))
+            const acc = Math.min(BOT.thiefPull, ad / dt);
+            ball.applyImpulse(new CANNON.Vec3(
+              (ax / ad) * acc * ball.mass * dt, 0, (az / ad) * acc * ball.mass * dt,
+            ));
+            ball.wakeUp();
+          }
+        }
+      }
+    }
+
     // ---- 목표 지점을 역할별로 정한다.
     let tx: number, tz: number;
-    if (role === "bruiser") {
+    if (role === "thief" && s.owning && s.fleeT > BOT.thiefFleeTime - BOT.thiefSettle) {
+      // 뺏은 직후: 아직 도망가지 않는다. 공 쪽을 보며 몸을 돌린다
+      // (BOT.thiefSettle 주석 — 여기서 달아나면 공을 두고 간다).
+      tx = ball.position.x;
+      tz = ball.position.z;
+    } else if (role === "thief" && s.owning) {
+      // 공을 가진 도둑은 **골 반대쪽으로** 도망간다. 가장 가까운 사람에게서도
+      // 멀어지는 쪽으로 옆으로 빠지므로, 한 명이 앞을 막아야 방향이 꺾인다.
+      const away = goalZ < 0 ? 1 : -1;                 // 골이 -Z면 +Z로 도망
+      tz = p.z + away * 14;
+      tx = p.x;
+      if (nearHuman) {
+        const hx = nearHuman.pelvis.position.x;
+        tx = p.x + (p.x - hx >= 0 ? 1 : -1) * 5;
+      }
+      const edge = laneHalf - BOT.thiefFleeMargin;
+      tx = Math.max(-edge, Math.min(edge, tx));
+    } else if (role === "bruiser") {
       // 공을 든 사람(없으면 가장 가까운 사람)에게 달려가 밀어낸다. 공은 안 쫓는다.
       const mark = carrier ?? nearHuman;
       if (mark) {
@@ -283,7 +487,8 @@ export function createBots(laneHalf: number) {
     // ---- 공을 걷어찬다 (bruiser는 공을 안 건드린다 - 사람만 노린다)
     const bdx = ball.position.x - p.x;
     const bdz = ball.position.z - p.z;
-    if (role !== "bruiser"
+    // (도둑은 공을 걷어차지 않는다 - 가져가는 게 일이라 차 버리면 자기 공을 잃는다)
+    if (role !== "bruiser" && role !== "thief"
         && Math.hypot(bdx, bdz) < BOT.stealDist && s.stealTimer <= 0 && s.clock >= BOT.spawnGrace) {
       ball.applyImpulse(new CANNON.Vec3(s.dirX * BOT.stealImpulse, 0.8, s.dirZ * BOT.stealImpulse));
       ball.wakeUp();
@@ -350,8 +555,13 @@ export function createBots(laneHalf: number) {
       }
     }
 
-    return { input: { moveX: s.dirX, moveZ: s.dirZ, jump: false }, brokeCarry, tackled };
+    return { input: { moveX: s.dirX, moveZ: s.dirZ, jump: false }, brokeCarry, tackled, thief };
   }
 
-  return { update, forget, stateOf };
+  /** 이 봇이 지금 공을 끌고 가는 중인가 (HUD 안내 / 테스트에서 읽는다) */
+  function owningBall(rag: Ragdoll): boolean {
+    return states.get(rag)?.owning ?? false;
+  }
+
+  return { update, forget, stateOf, owningBall };
 }

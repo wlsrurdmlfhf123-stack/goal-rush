@@ -90,6 +90,30 @@ export interface CourseSection {
 /** 튜플로 적어도 되게 열어 둔다 — 폭만 바뀌는 평범한 구간은 이쪽이 짧다 */
 export type SectionLike = CourseSection | [number, number, number];
 
+/**
+ * 코스를 가로막는 고정 벽 한 장.
+ *
+ * [왜 필요해졌나] 「둘이 밀어야 움직이는 문」(`pushblock`)은 **길을 막고 있어야**
+ * 의미가 있다. 그런데 지금까지 코스가 만들 수 있는 것은 바닥과 난간뿐이라,
+ * 레인 한가운데에 문틀을 세울 방법이 없었다 — 문 옆으로 그냥 걸어서 지나가면
+ * 협동 장치가 장식이 된다.
+ *
+ * 벽은 `solid()`라 실제 물리 바디가 하나 늘어난다(장식이 아니다). 문틀 하나에
+ * 둘이면 충분하므로 남발하지 않는다.
+ */
+export interface StageWall {
+  /** 중심 x / z */
+  x: number;
+  z: number;
+  /** 가로 폭 */
+  w: number;
+  /** 높이 (기본 2.6 — 사람이 못 넘는다) */
+  h?: number;
+  /** z 방향 두께 (기본 1.0) */
+  len?: number;
+  color?: number;
+}
+
 /** 스테이지가 직접 놓는 소품 (둘이 밀어야 하는 상자 등) */
 export interface StageProp {
   /** [가로, 높이, 깊이] */
@@ -127,6 +151,8 @@ export interface StageCfg {
   gimmicks?: GimmickSpec[];
   /** 스테이지가 직접 놓는 소품 */
   props?: StageProp[];
+  /** 레인을 가로막는 고정 벽 (문틀을 세울 때 쓴다) */
+  walls?: StageWall[];
   /**
    * 공만 지나가는 낮은 틈의 z 목록 (mapkit buildBallSlot).
    * 사람은 옆으로 돌아가야 하므로 킥과 드리블을 따로 쓰게 된다.
@@ -145,6 +171,11 @@ export interface StageCfg {
    * 하는 이유라서, 우회로가 생기면 의미가 사라진다.
    */
   shortcuts?: [number, number][];
+  /**
+   * 체크포인트의 z 목록. `MapDef.checkpoints`와 **같은 값**을 적어야 한다 —
+   * 위쪽은 런타임(main.ts)이 판정에 쓰고, 여기는 바닥에 표시를 그린다.
+   */
+  checkpoints?: number[];
   /** 튜토리얼 패드를 깔 것인가 (1스테이지만) */
   tutorial?: boolean;
   /** 공의 시작 위치 [x, z]. 기본은 출발선 안쪽 가운데 */
@@ -501,12 +532,76 @@ export function makeCourse(cfg: StageCfg) {
     }
   }
 
+  // ---- 스위치와 문을 눈으로 잇는다
+  //
+  // [왜 필요한가] buttongate는 발판과 문이 한 몸이라 관계가 저절로 보이는데,
+  // lever는 문에서 **떨어뜨려 놓는 것이 목적**이라 아무것도 안 그리면
+  // "이 판을 밟으면 뭐가 열리는가"를 알 방법이 없다. 바닥에 색 줄 하나만
+  // 그어 두면 밟고 서서 고개를 들면 그 줄이 문으로 이어져 있다.
+  // 전부 장식(deco)이라 물리 바디가 늘지 않는다.
+  {
+    const gates = (cfg.gimmicks ?? []).filter((g) => g.kind === "holdgate" || g.kind === "coopgate");
+    for (const sw of cfg.gimmicks ?? []) {
+      if (sw.kind !== "lever" && sw.kind !== "ballsocket") continue;
+      if (sw.link === undefined) continue;
+      const door = gates.find((d) => d.link === sw.link);
+      if (!door) continue;
+      const sx = sw.x ?? 0, dx = door.x ?? 0;
+      const steps = Math.max(2, Math.round(Math.abs(sw.z - door.z) / 2.2));
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        deco(b, [0.16, 0.05, 1.0], [sx + (dx - sx) * t, 0.035, sw.z + (door.z - sw.z) * t],
+          0x8b5cf6, [0, 0, 0], { rough: 0.7 });
+      }
+    }
+  }
+
+  // ---------------------------------------------------------- 고정 벽 (문틀)
+  for (const w of cfg.walls ?? []) {
+    const h = w.h ?? 2.6;
+    const len = w.len ?? 1.0;
+    solid(b, [w.w, h, len], [w.x, h / 2, w.z], w.color ?? GR.fence, [0, 0, 0], { rough: 0.55 });
+    // 윗면 띠 — 난간과 같은 어휘로 "넘을 수 없는 것"임을 알린다
+    deco(b, [w.w, 0.16, len + 0.1], [w.x, h + 0.06, w.z], GR.fenceTop, [0, 0, 0], { rough: 0.4 });
+  }
+
   let pid = STAGE_PROP_ID0;
   for (const p of cfg.props ?? []) {
     addProp(pid++, p.size, p.pos, p.color, p.mass, p.grabRadius ?? Math.max(...p.size) * 0.8);
   }
 
   for (const z of cfg.ballSlots ?? []) buildBallSlot(b, z, LANE_HALF);
+
+  // ---------------------------------------------------------- 체크포인트
+  //
+  // 물리는 없다 — 판정은 main.ts가 z 좌표로만 한다. 여기서 그리는 것은
+  // "여기를 **둘 다** 지나면 저장된다"를 알아볼 수 있게 하는 표시다.
+  // 초록 깃대 두 개 + 바닥 줄무늬. 구간 아치(gate)와 색이 겹치지 않게 고른다.
+  for (const cz of cfg.checkpoints ?? []) {
+    if (!onDeck(0, cz)) {
+      console.warn(
+        `[course:${tag}] 체크포인트 z=${cz} 자리에 x=0 바닥이 없다. ` +
+        `되살아난 사람과 공이 그 자리에서 떨어진다.`,
+      );
+    }
+    const halfHere = (() => {
+      let m = LANE_HALF;
+      for (const s of secs) if (cz <= s.z0 && cz >= s.z1 && s.x === 0) m = s.half;
+      return m;
+    })();
+    deco(b, [halfHere * 2 - 0.5, 0.07, 0.9], [0, 0.05, cz], 0x3ddc84, [0, 0, 0], { rough: 0.6 });
+    for (let i = 0; i < 8; i++) {
+      const w = (halfHere * 2 - 0.5) / 8;
+      deco(b, [w * 0.8, 0.09, 0.34], [-halfHere + 0.25 + w * (i + 0.5), 0.07, cz],
+        i % 2 ? 0xffffff : 0x2b2f38, [0, 0, 0], { rough: 0.8 });
+    }
+    // 깃대 — 멀리서 보고 "저기까지 가면 저장된다"를 노린다
+    for (const sx of [-1, 1]) {
+      const px = sx * Math.max(1.2, halfHere - 0.7);
+      decoCyl(b, 0.12, 0.12, 3.0, [px, 1.5, cz], 0x3ddc84, [0, 0, 0], { rough: 0.45 });
+      deco(b, [0.9, 0.6, 0.06], [px + sx * 0.5, 2.7, cz], 0x3ddc84, [0, 0, 0], { rough: 0.5 });
+    }
+  }
 
   // ---------------------------------------------------------- 튜토리얼 구간
   //

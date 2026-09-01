@@ -16,7 +16,7 @@ import { createAudio, type SfxName } from "./audio";
 import { initSettingsUI } from "./settings-ui";
 import { HZ, createHazards } from "./hazards";
 import { createObstacles } from "./obstacles";
-import { BOT, createBots, roleForBot } from "./bot";
+import { BOT, createBots, isBotRole, roleForBot, type BotRole } from "./bot";
 import { SC, createScuffle } from "./scuffle";
 import { createFlair } from "./flair";
 import type { GamePhase, InputState, ObjectState, RagdollSnapshot, SfxEvent } from "./protocol";
@@ -890,6 +890,20 @@ function updateBotSpawns() {
 /** 이만큼 앞까지 접근하면 봇이 등장한다 (m) */
 const BOT_APPEAR_AHEAD = 26;
 
+/**
+ * 이 봇의 역할.
+ *
+ * 맵이 `botRoles`로 지정했으면 그것을, 아니면 `bot.ts`의 기본 규칙을 쓴다.
+ * 봇 id는 `-(botSpawns 인덱스 + 1)`이라 두 배열이 같은 순서로 맞는다.
+ * 맵이 오타를 냈으면(`isBotRole`이 거른다) 기본 규칙으로 조용히 돌아간다 —
+ * 문자열 하나 때문에 스테이지가 안 도는 것보다 낫다.
+ */
+function botRoleOf(botId: number): BotRole {
+  const roles = world.map.botRoles;
+  const name = roles?.[-botId - 1];
+  return name && isBotRole(name) ? name : roleForBot(botId);
+}
+
 /** host 전용. 맵을 새로 켤 때 봇을 전부 치운다 (등장은 이벤트로 다시 일어난다) */
 function spawnBots() {
   if (!authority) return;
@@ -1051,12 +1065,17 @@ world.onMapLoaded(() => {
   skillHintCd = 0;
   gateHintsShown = 0;
   gateOpenHinted = new Set();
+  pushHintShown = new Set();
   slotHintShown = new Set();
   slotPassed = new Set();
   slotIdle = 0;
   seenGateOpen = new Set();
   passFrom = null;
   ballBestZ = null; backstopTold = false;
+  // 새 맵은 새 코스다. 체크포인트와 어시스트 기록은 맵을 넘어 이어지지 않는다.
+  checkpointIdx = -1;
+  shownCheckpoint = -1;
+  ballTouchedAt.clear();
 });
 hazards.rebuild();
 obstacles.rebuild();
@@ -1375,12 +1394,16 @@ function resetWorld() {
   // 공이 출발점으로 돌아갔으니 되밀림 기준도 같이 지운다.
   // (안 지우면 지난 판의 최전진 지점이 남아 새 판 시작부터 한계선에 걸린다)
   ballBestZ = null; backstopTold = false;
+  // 어시스트 기록도 새 판 기준이다. 안 지우면 지난 판에 친구가 건드린 것이
+  // 남아서, 이번 판에 혼자 몰고 간 공이 협동 골로 인정된다.
+  ballTouchedAt.clear();
   // 다시하기는 새 시도다. 상황 안내도 다시 뜰 수 있게 되돌린다.
   slotHintShown = new Set();
   slotPassed = new Set();
   slotIdle = 0;
   gateHintsShown = 0;
   gateOpenHinted = new Set();
+  pushHintShown = new Set();
   // 사고 연출도 새 판 기준으로 되돌린다. 특히 ballSeen을 안 지우면 스폰
   // 지점으로 돌아간 공의 텔레포트가 "뻥 날아갔다"로 잡힌다.
   ballSeen = false;
@@ -1419,15 +1442,45 @@ function resetWorld() {
     o.mesh.quaternion.set(home.q.x, home.q.y, home.q.z, home.q.w);
   }
 
+  // 2-1) 체크포인트를 통과했으면 공을 그 자리로 옮긴다.
+  //
+  // 소품 복구(2)가 공까지 출발선으로 돌려놨으므로 **그 뒤에** 덮어써야 한다.
+  const cpZ = checkpointZ();
+  if (cpZ !== null) {
+    const ball = objectById.get(BALL_ID);
+    if (ball) {
+      ball.body.position.set(0, 1.0, cpZ + 1.2);
+      ball.body.velocity.setZero();
+      ball.body.angularVelocity.setZero();
+      ball.mesh.position.set(0, 1.0, cpZ + 1.2);
+    }
+  }
+
   // 3) 캐릭터 복구. rag.reset()이 속도/힘/관절 상태까지 정리해 준다.
   //    봇은 사람 스폰 지점이 아니라 자기 자리(맵의 botSpawns)로 돌려보낸다.
+  //
+  //    체크포인트를 통과했으면 사람은 거기서 다시 시작한다. 스폰 지점의 x를
+  //    그대로 쓰지 않는 이유는, 체크포인트가 좁은 구간(외줄 다리 등)에 있을 수
+  //    있어서다 — 가운데에 붙여 세우고 z만 어긋나게 둔다.
   let i = 0, bi = 0;
   const botSpots = world.map.botSpawns ?? [];
   for (const e of playersById.values()) {
     const sp = spawns();
-    const [sx, sz] = isBot(e.id) && botSpots.length
-      ? botSpots[bi++ % botSpots.length]
-      : sp[i++ % sp.length];
+    let sx: number, sz: number;
+    if (isBot(e.id) && botSpots.length) {
+      [sx, sz] = botSpots[bi++ % botSpots.length];
+    } else if (cpZ !== null) {
+      // [좌우로 벌리고 z 는 거의 안 어긋낸다] 체크포인트는 외줄 다리처럼
+      // 좁은 판 위에 있을 수 있으므로 x 는 ±0.8 까지만 벌린다. z 를 크게
+      // 어긋내면 뒷사람이 **체크포인트보다 앞(= 아직 안 지난 자리)** 이나
+      // 장애물 안쪽에 놓일 수 있어서 1.2m 로 붙여 둔다. 스테이지가
+      // 체크포인트를 놓을 때 그 앞 3~5m 를 비워 두면 된다.
+      const k = i++;
+      sx = (k % 2 ? 1 : -1) * 0.8;
+      sz = cpZ + 3.0 + Math.floor(k / 2) * 1.2;
+    } else {
+      [sx, sz] = sp[i++ % sp.length];
+    }
     e.rag.reset(new CANNON.Vec3(sx, P.rideHeight + 0.15, sz));
     e.input.moveX = 0; e.input.moveZ = 0; e.input.jump = false;
     e.grabPending = false;
@@ -1446,6 +1499,12 @@ const game = createGame(world, {
   requestNextMapRemote: () => net.send({ type: "nextMap" }),
   // 안고 들어가는 건 골이 아니다 (game.ts checkCross 주석)
   isBallCarried: () => grabs.some((g) => g.objectId === BALL_ID),
+  // 협동 골 스테이지에서는 둘 다 공을 건드렸어야 인정된다 (isGoalValid 주석)
+  isGoalValid,
+  onGoalRejected,
+  // 체크포인트 번호는 host가 정해 스냅샷에 실어 보낸다
+  checkpoint: () => checkpointIdx,
+  setCheckpoint: (n: number) => { checkpointIdx = n; },
   onGoal: () => {
     sfx.play("goal");
     sfx.play("crowd", { vol: 0.9 });   // 관중 환호
@@ -1655,6 +1714,125 @@ function updateBallBackstop(dt: number) {
   }
 }
 
+// ---------------------------------------------------------------- 체크포인트
+//
+// [무엇을 푸는가] 코스가 100~130m이고 제한시간이 3~4분이다. 마지막 구간에서
+// 시간이 끊기면 다시 처음부터 뛰어야 하는데, 2인 협동에서는 그 좌절이 두 배다
+// (내 실수로 친구까지 처음으로 돌아간다). 체크포인트는 "실패해도 다시
+// 도전하고 싶은" 자리를 만드는 장치다.
+//
+// [왜 **둘 다** 지나야 하는가] 한 명만 지나도 저장되게 하면, 앞서 달리는
+// 사람이 저장선을 계속 밀고 나가서 뒤처진 사람은 매번 혼자 남겨진 자리에서
+// 되살아난다. 둘 다여야 「기다려 줘」가 나오고, 그게 이 게임이 원하는 대사다.
+//
+// [동기화] 판정은 host만 한다. 결과(몇 번째까지 통과했나)는 GameSnapshot의
+// `c`에 실려 모든 클라이언트로 간다 — 한쪽만 체크포인트를 통과한 상태가 되는
+// 일이 없다. 되돌리는 것 자체도 host의 resetWorld 한 곳에서만 일어난다.
+
+/** 마지막으로 통과한 체크포인트 번호 (-1 = 아직 없음). host가 정하고 스냅샷으로 나른다 */
+let checkpointIdx = -1;
+/** 비-host가 "방금 하나 늘었다"를 알아채기 위한 직전 값 */
+let shownCheckpoint = -1;
+
+/** 지금 되살아날 z. 체크포인트가 없으면 null (= 출발선에서 시작) */
+function checkpointZ(): number | null {
+  const cps = world.map.checkpoints;
+  if (!cps || checkpointIdx < 0 || checkpointIdx >= cps.length) return null;
+  return cps[checkpointIdx];
+}
+
+function updateCheckpoints() {
+  if (!authority) return;
+  const cps = world.map.checkpoints;
+  if (!cps || cps.length === 0) return;
+  if (checkpointIdx >= cps.length - 1) return;
+  const humans = [...playersById.values()].filter((e) => !isBot(e.id));
+  if (humans.length === 0) return;
+  const next = cps[checkpointIdx + 1];
+  // 코스는 -Z로 간다. 살아 있는 사람이 **전부** 그 선을 넘었는가.
+  for (const e of humans) if (e.rag.pelvis.position.z > next) return;
+  checkpointIdx++;
+  announceCheckpoint(next);
+}
+
+/** 체크포인트 통과 연출. host/비-host 양쪽에서 같은 것을 띄운다 */
+function announceCheckpoint(z: number) {
+  shownCheckpoint = checkpointIdx;
+  sfx.play("goal", { vol: 0.55, rate: 1.5 });
+  addShake(0.3);
+  showAlert("체크포인트!");
+  showMove("체크포인트", "여기서 다시 시작한다");
+  for (const sx of [-1, 1]) fx.kick(sx * 3.2, 0.05, z, 0.7);
+}
+
+/**
+ * 비-host용: 스냅샷의 체크포인트 번호가 올라가면 같은 연출을 띄운다.
+ *
+ * (버튼 문/패스 게이트를 `watchGatesLocally`가 관찰로 처리하는 것과 같은
+ *  방식이다 — 이벤트 메시지를 새로 만들지 않는다)
+ */
+function watchCheckpointLocally() {
+  if (authority) return;
+  if (checkpointIdx <= shownCheckpoint) return;
+  const cps = world.map.checkpoints ?? [];
+  announceCheckpoint(cps[checkpointIdx] ?? 0);
+}
+
+// ------------------------------------------------------------ 협동 골 (어시스트)
+//
+// 마지막 스테이지의 규칙: **둘이 모두 공을 건드린 뒤에야** 골이 인정된다
+// (`MapDef.coopGoal`). 한 명이 처음부터 끝까지 혼자 몰고 가서 넣는 그림을
+// 없애기 위한 것이다.
+//
+// [싱글은 건드리지 않는다] 사람이 하나뿐이면 이 규칙 자체가 꺼진다. 혼자서는
+// 절대 못 깨는 스테이지를 만들지 않는다는 원칙 그대로다.
+
+/** 사람 id -> 마지막으로 공을 건드린 시각 (초, performance.now 기준) */
+const ballTouchedAt = new Map<number, number>();
+/** 어시스트로 인정하는 시간 창 (초) */
+const ASSIST_WINDOW = 14;
+
+/** 누군가 공을 건드렸다 (드리블 터치 / 킥 / 줍기). host에서만 기록한다 */
+function noteBallTouch(playerId: number) {
+  if (!authority || isBot(playerId)) return;
+  ballTouchedAt.set(playerId, performance.now() / 1000);
+}
+
+/** 지금 골이 인정되는가 (game.ts가 골라인 통과 순간에 묻는다) */
+function isGoalValid(): boolean {
+  if (!world.map.coopGoal) return true;
+  if (humanCount() < 2) return true;
+  const now = performance.now() / 1000;
+  let n = 0;
+  for (const [id, t] of ballTouchedAt) {
+    if (!playersById.has(id)) continue;
+    if (now - t <= ASSIST_WINDOW) n++;
+  }
+  return n >= 2;
+}
+
+/** 골이 거절됐을 때 (혼자 넣었다). 공을 골 앞으로 되돌리고 이유를 말해준다 */
+let goalRejectTold = 0;
+function onGoalRejected() {
+  const b = ballBody();
+  if (b) {
+    b.position.set(world.map.goal.x, 0.6, world.map.goal.z + 4.5);
+    b.velocity.setZero();
+    b.angularVelocity.setZero();
+    b.wakeUp();
+  }
+  // 여기서 z를 옮기는 건 순간이동이다. "공이 갑자기 튀었다" 연출이 이걸
+  // 사고로 오인하지 않게 같은 쿨다운을 걸어 둔다 (updateBallBackstop과 같다).
+  blastCool = BLAST.cool;
+  const now = performance.now() / 1000;
+  if (now - goalRejectTold < 3) return;
+  goalRejectTold = now;
+  netSfx("fail", null, 0.6, 1.3);
+  addShake(0.35);
+  showAlert("혼자서는 못 넣는다!");
+  showMove("협동 골", "둘 다 공을 건드린 뒤에 넣어야 한다");
+}
+
 /** 사람이 한 명이면 게이트를 전부 열어둔다 (싱글이 막히면 안 된다) */
 function syncCoopGates() {
   if (!authority) return;
@@ -1763,6 +1941,12 @@ const NUDGE_LINES = ["어이쿠", "부딪혔다", "미안"];
 const GRAB_LINES = ["붙잡았다", "어딜 가", "같이 가자"];
 /** 공을 안고 있던 친구를 떨어뜨렸을 때 */
 const STEAL_LINES = ["공 놓쳤다!", "내놔", "그거 이제 내 거"];
+/** 공이 범퍼에 튕겨 엉뚱한 데로 갔을 때 */
+const BUMPER_LINES = ["어디 가!", "튕겼다", "그쪽 아니야", "범퍼 맞았다"];
+/** 봇이 공을 가져갔을 때 — 이 게임에서 제일 시끄러워야 할 자리다 */
+const THIEF_LINES = ["야 저 새끼 공 가져갔어!", "도둑이야!", "쫓아가 쫓아가", "막아! 막아!"];
+/** 도둑에게서 공을 되찾았을 때 */
+const THIEF_BACK_LINES = ["되찾았다!", "내놔라 했지", "공 회수 완료"];
 
 function updatePlayerBumps(dt: number) {
   if (!authority) return;
@@ -1983,7 +2167,28 @@ function updateGateHint(dt: number, me: Ragdoll | null) {
       return;
     }
   }
+
+  // ---- 둘이 밀어야 움직이는 문
+  //
+  // [왜 안내가 꼭 필요한가] 버튼 문은 발판이 눈에 보여서 "밟으라"는 게 형태로
+  // 읽힌다. 그런데 상자는 그냥 벽처럼 생겼다. 밀리는 물건인 줄 모르면 길이
+  // 막힌 것으로 보이고, 알아도 **혼자 밀면 아무 반응이 없어서** "안 되는
+  // 거구나"로 결론 내린다. 붙었을 때 한 번은 말해 줘야 한다.
+  for (const pb of obstacles.pushBlocks()) {
+    if (pb.done) continue;
+    const ahead = p.z - pb.z;
+    if (ahead < 0 || ahead > PUSH_HINT_NEAR) continue;
+    if (pushHintShown.has(pb.z)) continue;
+    pushHintShown.add(pb.z);
+    showMove("둘이 같이 밀어라", "혼자 밀면 꿈쩍도 안 한다 — 나란히 붙어서 앞으로");
+    gateHintCooldown = 6;
+    return;
+  }
 }
+/** 미는 문 안내를 띄울 거리 (m) */
+const PUSH_HINT_NEAR = 7;
+/** 이미 안내한 미는 문의 z (한 문당 한 번) */
+let pushHintShown = new Set<number>();
 
 // ---------------------------------------------------------------- 경고 배너
 //
@@ -2904,8 +3109,31 @@ function fixedUpdate(dt: number) {
             carriers,
             humans: [...playersById.values()].filter((x) => !isBot(x.id)).map((x) => x.rag),
             goalZ: world.map.goal.z,
-            role: roleForBot(e.id),
+            role: botRoleOf(e.id),
           });
+          // ---- 공 도둑: 뺏겼다 / 되찾았다
+          //
+          // 새 시스템이 아니라 기존 배관(netSfx / fx / dramaLine)에 얹는다.
+          // 두 화면 모두에서 같은 것이 보여야 해서 netSfx 로 보낸다.
+          if (r.thief) {
+            const bp = e.rag.pelvis.position;
+            if (r.thief.kind === "stole") {
+              netSfx("botSpawn", null, 0.9, 1.25);
+              addShake(0.55);
+              fx.kick(bp.x, 0.4, bp.z, 1);
+              showAlert("공을 빼앗겼다!");
+              dramaLine("thief", THIEF_LINES, 5);
+            } else {
+              netSfx("hit", null, 0.9, 0.9);
+              fx.kick(bp.x, 0.4, bp.z, 0.8);
+              // 사람이 부딪혀 뺏은 경우에만 크게 알린다 (시간이 다 돼서 놓은
+              // 것까지 축하하면 "내가 한 것"이 무엇인지 흐려진다)
+              if (r.thief.by) {
+                addShake(isMine(r.thief.by) ? 0.7 : 0.3);
+                if (!dramaLine("thief", THIEF_BACK_LINES, 4)) showMove("탈환!", "부딪혀서 공을 되찾았다");
+              }
+            }
+          }
           e.input.moveX = r.input.moveX;
           e.input.moveZ = r.input.moveZ;
           e.input.jump = false;
@@ -3081,6 +3309,7 @@ function fixedUpdate(dt: number) {
           if (k) {
             // 패스 판정용: 누가 어디서 찼는지 (updateCoopPass 주석 참고)
             passFrom = { id: e.id, x: k.x, z: k.z, t: performance.now() };
+            noteBallTouch(e.id);   // 협동 골 어시스트 (isGoalValid 주석)
             fx.kick(k.x, k.y, k.z, k.power);
             netSfx("kick", e.id, 0.55 + k.power * 0.45, 1.15 - k.power * 0.25);
             if (isMine(e.rag)) addShake(0.25 + k.power * 0.35);
@@ -3103,6 +3332,7 @@ function fixedUpdate(dt: number) {
         if (tc) {
           fx.touch(tc.x, tc.y, tc.z, tc.strength);
           netSfx("touch", e.id, 0.4 + tc.strength * 0.6);
+          noteBallTouch(e.id);   // 협동 골 어시스트 (isGoalValid 주석)
         }
         if (carryingBall) ballPlay.carryPenalty(e.rag);
       } else {
@@ -3162,7 +3392,24 @@ function fixedUpdate(dt: number) {
       // 회전봉과 피스톤은 kinematic이라 부딪힌 쪽이 실제로 밀려나고,
       // 거대 공에 맞은 사람만 여기서 넉백 처리를 받는다.
       const obHits = obstacles.update(dt, rags, ballBody() ?? undefined);
+      // 범퍼에 튕겼다 / 점프 패드를 밟았다 — 넉백과 성격이 달라서 따로 온다
+      // (obstacles.ts ObstacleFx 주석). 연출만 붙이고 캐리는 건드리지 않는다.
+      for (const f of obstacles.takeFx()) {
+        const mine = f.rag ? isMine(f.rag) : false;
+        if (f.kind === "bumper") {
+          netSfx("hit", null, 0.5 + f.power * 0.5, 1.7);
+          fx.kick(f.x, f.y, f.z, 0.5 + f.power * 0.5);
+          if (mine) addShake(0.25 + f.power * 0.45);
+          if (!f.rag && !dramaLine("bumper", BUMPER_LINES, 5)) { /* 공이 튄 건 조용히 */ }
+        } else {
+          netSfx("step", null, 0.9, 0.5);
+          fx.dash(f.x, f.z, 0, 0);
+          fx.kick(f.x, 0.05, f.z, 0.6);
+          if (mine) { addShake(0.3); showMove("점프 패드", "위로 튀어 오른다"); }
+        }
+      }
       updateBotSpawns();
+      updateCheckpoints();
       updateCoopPass();
       syncCoopGates();
       updateBallBackstop(dt);
@@ -3384,6 +3631,7 @@ function animate() {
   updateGateHint(frameDt, camTarget ? camTarget.rag : null);
   updateSlotHint(camTarget ? camTarget.rag : null);
   watchGatesLocally();
+  watchCheckpointLocally();
 
   // 목표/출구 마커 애니메이션 + 상단 HUD (렌더 직전, 물리와 무관)
   game.render(frameDt);
@@ -3567,5 +3815,44 @@ if (DEBUG) {
       e.rag.reset(new CANNON.Vec3(x, P.rideHeight + 0.15, z));
       return e.rag.pelvis.position.toArray();
     },
+    /**
+     * 아무 캐릭터나 자리를 옮긴다 (host 전용, 검증용).
+     *
+     * `teleport`는 「서로조종」때문에 **내가 모는 캐릭터**만 옮긴다. 2인 검증에서는
+     * 두 사람을 각자 원하는 자리(예: 좌우 발판)에 세워야 하는데 그게 안 됐다.
+     * 비-host 에서 부르면 다음 스냅샷이 덮어쓰므로 아무 소용이 없다 (HANDOFF 13-7).
+     */
+    place(playerId: number, x: number, z: number) {
+      const e = playersById.get(playerId);
+      if (!e || !authority) return null;
+      releaseGrabsOf(e.rag);
+      e.rag.reset(new CANNON.Vec3(x, P.rideHeight + 0.15, z));
+      return e.rag.pelvis.position.toArray();
+    },
+    /**
+     * 협동 장치 현황 — 2인 검증에서 **양쪽 화면이 같은가**를 보는 용도.
+     *
+     * 문의 높이는 스냅샷으로 오는 바디 위치라 비-host 에서도 그대로 읽힌다.
+     * 체크포인트는 GameSnapshot 의 `c` 로 온다.
+     */
+    coop: () => ({
+      humans: humanCount(),
+      checkpoint: checkpointIdx,
+      checkpointZ: checkpointZ(),
+      coopGoal: !!world.map.coopGoal,
+      goalValid: isGoalValid(),
+      // 공을 최근에 건드린 사람들 (협동 골 어시스트)
+      touched: [...ballTouchedAt.keys()],
+      signals: obstacles.signals(),
+      gates: obstacles.stations
+        .filter((s) => ["coopgate", "buttongate", "holdgate"].includes(s.spec.kind))
+        .map((s) => ({
+          kind: s.spec.kind, z: s.spec.z,
+          // 문이 바닥 아래로 내려가 있으면 열린 것이다 (OB.gateSink)
+          open: s.body.position.y < 0,
+          y: +s.body.position.y.toFixed(2),
+        })),
+      push: obstacles.pushBlocks().map((p) => ({ z: p.z, off: +p.off.toFixed(2), done: p.done })),
+    }),
   };
 }

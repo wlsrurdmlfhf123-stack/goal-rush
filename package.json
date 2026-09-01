@@ -11,7 +11,7 @@
     "share": "node scripts/share.mjs",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
-    "test": "npm run test:net && npm run test:room && npm run test:ws && npm run test:ragdoll && npm run test:swap && npm run test:explosion && npm run test:game && npm run test:ball && npm run test:map && npm run test:gimmick && npm run test:scuffle && npm run test:flair",
+    "test": "npm run test:net && npm run test:room && npm run test:ws && npm run test:ragdoll && npm run test:swap && npm run test:explosion && npm run test:game && npm run test:ball && npm run test:map && npm run test:gimmick && npm run test:scuffle && npm run test:bot && npm run test:flair",
     "test:net": "node test/net-test.js",
     "test:ws": "node test/ws-proxy-test.js",
     "test:ragdoll": "esbuild test/ragdoll-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/ragdoll-test.mjs && node test/.build/ragdoll-test.mjs",
@@ -23,7 +23,8 @@
     "test:map": "esbuild test/map-smoke-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/map-smoke-test.mjs && node test/.build/map-smoke-test.mjs",
     "test:gimmick": "esbuild test/gimmick-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/gimmick-test.mjs && node test/.build/gimmick-test.mjs",
     "test:scuffle": "esbuild test/scuffle-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/scuffle-test.mjs && node test/.build/scuffle-test.mjs",
-    "test:flair": "esbuild test/flair-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/flair-test.mjs && node test/.build/flair-test.mjs"
+    "test:flair": "esbuild test/flair-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/flair-test.mjs && node test/.build/flair-test.mjs",
+    "test:bot": "esbuild test/bot-test.ts --bundle --platform=node --format=esm --packages=external --outfile=test/.build/bot-test.mjs && node test/.build/bot-test.mjs"
   },
   "dependencies": {
     "cannon-es": "^0.20.0",

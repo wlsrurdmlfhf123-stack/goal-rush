@@ -40,12 +40,24 @@ interface Decl {
   params?: Record<string, number>;
 }
 
+type MoveInput = { moveX: number; moveZ: number; jump: boolean };
+/**
+ * 스텝 입력. 함수를 주면 **래그돌마다 다른 입력**을 준다.
+ *
+ * (「둘이 밀어야 움직이는 문」은 두 사람이 서로 다른 자리에서 같은 방향으로
+ *  걸어가야 하는 상황이라, 전원 같은 입력으로는 재현할 수 없다)
+ */
+type StepInput = MoveInput | ((i: number) => MoveInput);
+
 interface Rig {
   ball: CANNON.Body;
   obstacles: ReturnType<typeof createObstacles>;
   rags: Ragdoll[];
+  physics: CANNON.World;
   addRagdoll(x: number, z: number, y?: number): Ragdoll;
-  step(n?: number, input?: { moveX: number; moveZ: number; jump: boolean }): void;
+  step(n?: number, input?: StepInput): void;
+  /** 지금까지 장애물이 사람을 때린 횟수 (update() 의 hits 를 센 것) */
+  hits(): number;
 }
 
 /** 맵 없이(=DOM 없이) 장애물 station 만 세우는 rig. 바디는 world.ts 와 같은 모양이다 */
@@ -128,6 +140,38 @@ function build(decls: Decl[], ballAt: [number, number, number] = [0, B.radius + 
         pos = new CANNON.Vec3(x, h * 0.5, d.z);
         break;
       }
+      case "press": {
+        const w = pp.w ?? OB.pressW, l = pp.len ?? OB.pressD, h = pp.h ?? OB.pressH;
+        shape = new CANNON.Box(new CANNON.Vec3(w * 0.5, h * 0.5, l * 0.5));
+        pos = new CANNON.Vec3(x, (pp.topY ?? OB.pressTopY) + h * 0.5, d.z);
+        break;
+      }
+      case "pushblock": {
+        const w = pp.w ?? OB.pushW, h = pp.h ?? OB.pushH, l = pp.len ?? OB.pushD;
+        shape = new CANNON.Box(new CANNON.Vec3(w * 0.5, h * 0.5, l * 0.5));
+        pos = new CANNON.Vec3(x, h * 0.5, d.z);
+        break;
+      }
+      case "ice": {
+        const w = pp.w ?? OB.iceW, l = pp.len ?? OB.iceD;
+        shape = new CANNON.Box(new CANNON.Vec3(w * 0.5, 0.02, l * 0.5));
+        pos = new CANNON.Vec3(x, 0.02, d.z);
+        noResponse = true;
+        break;
+      }
+      case "bumper": {
+        const rr = pp.r ?? OB.bumperR;
+        shape = new CANNON.Cylinder(rr, rr, OB.bumperH, 12);
+        pos = new CANNON.Vec3(x, OB.bumperH * 0.5, d.z);
+        break;
+      }
+      case "jumppad": {
+        const jr = pp.r ?? OB.jumppadR;
+        shape = new CANNON.Cylinder(jr, jr, 0.12, 12);
+        pos = new CANNON.Vec3(x, 0.06, d.z);
+        noResponse = true;
+        break;
+      }
       default:
         shape = new CANNON.Box(new CANNON.Vec3(OB.gateW * 0.5, OB.gateH * 0.5, OB.gateD * 0.5));
         pos = new CANNON.Vec3(0, OB.gateH * 0.5, d.z);
@@ -171,14 +215,23 @@ function build(decls: Decl[], ballAt: [number, number, number] = [0, B.radius + 
    * (= 가만히 서 있음)이라 서보는 "월드 기준 속도 0"을 목표로 제동을 건다 -
    * 게임에서 발판 위에 가만히 서 있는 것과 같은 상황이다.
    */
-  const step = (n = 1, input: { moveX: number; moveZ: number; jump: boolean } = { moveX: 0, moveZ: 0, jump: false }) => {
+  /**
+   * 이번 rig 가 지금까지 낸 장애물 피격 수.
+   *
+   * [래그돌 state 를 세면 안 되는 이유] 넉백으로 날아간 몸이 착지하다 스스로
+   * 균형을 잃고 또 넘어지므로, `state !== ACTIVE` 전이를 세면 **장애물이
+   * 때린 횟수보다 많게** 나온다. 무엇이 몇 번 때렸는지를 알고 싶으면
+   * update() 가 돌려주는 hits 를 세야 한다.
+   */
+  let hitCount = 0;
+  const step = (n = 1, input: StepInput = { moveX: 0, moveZ: 0, jump: false }) => {
     for (let i = 0; i < n; i++) {
-      obstacles.update(dt, rags, ball);
-      for (const rag of rags) rag.control(dt, input, physics);
+      hitCount += obstacles.update(dt, rags, ball).length;
+      rags.forEach((rag, k) => rag.control(dt, typeof input === "function" ? input(k) : input, physics));
       physics.step(dt);
     }
   };
-  return { ball, obstacles, rags, addRagdoll, step };
+  return { ball, obstacles, rags, addRagdoll, step, physics, hits: () => hitCount };
 }
 
 // ---------------------------------------------------------------- 1. 플랫폼
@@ -490,6 +543,323 @@ console.log("\n--- TEST 7: park() 가 새 kind 도 되돌린다 ---");
   check("빈 맵도 안 터진다", r.obstacles.stations.length === 0);
   r.step(30);
   check("빈 맵에서 update 가 안전하다", true);
+}
+
+// ------------------------------------------------- 8. 둘이 밀어야 움직이는 문
+//
+// 이 스위트의 핵심이다. "두 명이 가까이 있으면 열린다"가 아니라 **한 사람 몫의
+// 힘으로는 정지 마찰을 못 넘는다**가 규칙이므로, 세는 것은 거리가 아니라
+// 「실제로 닿아 있고 상자 쪽으로 걸어가는 사람 수」다.
+console.log("\n--- TEST 8: 둘이 밀어야 움직이는 문 (pushblock) ---");
+{
+  /** 상자 뒤(+Z)에 사람을 n명 붙여 세우고 dur 초 동안 -Z 로 민다 */
+  function pushWith(n: number, dur = 3): number {
+    const r = build([{ kind: "pushblock", z: 0, x: 0, params: { axis: 1, span: 4, w: 4.4, h: 2.2, len: 1.4 } }]);
+    // 상자 앞면(z = +0.7)에 어깨가 닿도록 세운다
+    for (let i = 0; i < n; i++) r.addRagdoll((i - (n - 1) / 2) * 1.2, 1.35);
+    r.step(30);   // 서기 안정화 (이 동안은 입력이 0이라 안 밀린다)
+    const before = r.obstacles.stations[0].body.position.z;
+    r.step(Math.round(dur * 60), { moveX: 0, moveZ: -1, jump: false });
+    return before - r.obstacles.stations[0].body.position.z;   // 밀려난 거리(양수)
+  }
+  const one = pushWith(1);
+  const two = pushWith(2);
+  console.log(`       혼자 ${one.toFixed(2)}m / 둘이 ${two.toFixed(2)}m (3초)`);
+  check("혼자 밀면 안 움직인다", one < 0.05, `moved=${one.toFixed(3)}`);
+  check("둘이 밀면 실제로 밀린다", two > 1.0, `moved=${two.toFixed(3)}`);
+  check("둘이 밀어도 span(4) 을 넘지 않는다", two <= 4.02, `moved=${two.toFixed(3)}`);
+}
+{
+  // 손을 떼면 그 자리에 선다 (관성으로 계속 가지 않는다)
+  const r = build([{ kind: "pushblock", z: 0, x: 0, params: { axis: 1, span: 4, w: 4.4, h: 2.2, len: 1.4 } }]);
+  r.addRagdoll(-0.6, 1.35); r.addRagdoll(0.6, 1.35);
+  r.step(30);
+  r.step(90, { moveX: 0, moveZ: -1, jump: false });
+  const moved = r.obstacles.stations[0].body.position.z;
+  r.step(60);   // 입력 0 = 멈춰 선다
+  check("손을 떼면 그 자리에 선다",
+    Math.abs(r.obstacles.stations[0].body.position.z - moved) < 0.06,
+    `${moved.toFixed(3)} -> ${r.obstacles.stations[0].body.position.z.toFixed(3)}`);
+}
+{
+  // 반대 방향으로 걸으면(상자에서 멀어지면) 안 민다 — 등을 대고 서 있는 것도 마찬가지
+  const r = build([{ kind: "pushblock", z: 0, x: 0, params: { axis: 1, span: 4, w: 4.4, h: 2.2, len: 1.4 } }]);
+  r.addRagdoll(-0.6, 1.35); r.addRagdoll(0.6, 1.35);
+  r.step(30);
+  const before = r.obstacles.stations[0].body.position.z;
+  r.step(120, { moveX: 0, moveZ: 1, jump: false });
+  check("상자 반대쪽으로 걸으면 안 밀린다",
+    Math.abs(r.obstacles.stations[0].body.position.z - before) < 0.05,
+    `moved=${(before - r.obstacles.stations[0].body.position.z).toFixed(3)}`);
+}
+{
+  // 싱글 플레이 처리: openGate() 가 끝까지 밀어 둔다 (혼자면 원리적으로 불가능하므로)
+  const r = build([{ kind: "pushblock", z: 0, x: 0, params: { axis: 1, span: 4, w: 4.4, h: 2.2, len: 1.4 } }]);
+  check("싱글 자동 개방 대상이다", r.obstacles.needsSoloOpen());
+  r.obstacles.openGate();
+  r.step(10);
+  check("싱글에서는 끝까지 밀려 있다", r.obstacles.pushBlocks()[0].done);
+  check("자리도 span 만큼 가 있다",
+    Math.abs(r.obstacles.stations[0].body.position.z - 4) < 0.02,
+    `z=${r.obstacles.stations[0].body.position.z.toFixed(3)}`);
+  r.obstacles.park();
+  check("park() 후 제자리로", Math.abs(r.obstacles.stations[0].body.position.z) < 1e-6);
+}
+
+// ---------------------------------------------- 9. 2인 동시 압력판 (latch + openTime)
+//
+// "둘이 **동시에**"를 규칙이 아니라 **거리와 시간**으로 만드는 부분이다.
+// latch 1.2초 · 발판 사이 9.2m · 사람 최고 속도 4.6 m/s → 혼자서는 못 간다.
+console.log("\n--- TEST 9: 2인 동시 압력판 (lever.latch + holdgate.openTime) ---");
+const DUAL: Decl[] = [
+  { kind: "lever", z: 0, x: -4.6, link: 3, params: { latch: 1.2, w: 2.2, len: 2.2 } },
+  { kind: "lever", z: 0, x: 4.6, link: 3, params: { latch: 1.2, w: 2.2, len: 2.2 } },
+  { kind: "holdgate", z: -8, link: 3, params: { w: 5.6, h: 2.6, openTime: 4 } },
+];
+{
+  const r = build(DUAL);
+  const gate = r.obstacles.stations[2].body;
+  const closedY = gate.position.y;
+  r.addRagdoll(-4.6, 0);            // 왼쪽만 밟는다
+  r.step(120);
+  check("한쪽만 밟으면 안 열린다", gate.position.y > closedY - 0.2,
+    `y=${gate.position.y.toFixed(2)} (닫힘 ${closedY.toFixed(2)})`);
+  check("신호도 전부 켜지지는 않았다", r.obstacles.signalAll(3) === false);
+}
+{
+  const r = build(DUAL);
+  const gate = r.obstacles.stations[2].body;
+  r.addRagdoll(-4.6, 0);
+  r.addRagdoll(4.6, 0);             // 둘이 동시에
+  r.step(30);
+  check("둘 다 밟으면 신호가 전부 켜진다", r.obstacles.signalAll(3));
+  r.step(60);
+  check("문이 열린다", gate.position.y < -0.5, `y=${gate.position.y.toFixed(2)}`);
+}
+{
+  // latch 가 유지 시간을 만든다 — 발판에서 내려와도 openTime 동안 열려 있다.
+  // (그래야 밟은 둘이 **같이** 들어갈 수 있다)
+  const r = build(DUAL);
+  const gate = r.obstacles.stations[2].body;
+  const a = r.addRagdoll(-4.6, 0);
+  const bb = r.addRagdoll(4.6, 0);
+  r.step(40);
+  // 둘 다 발판 밖으로 치운다 (문 앞으로 뛰어갔다고 치자)
+  a.reset(new CANNON.Vec3(-1, P.rideHeight, -4));
+  bb.reset(new CANNON.Vec3(1, P.rideHeight, -4));
+  r.step(60);
+  check("발판에서 내려와도 openTime 동안 열려 있다", gate.position.y < -0.5,
+    `y=${gate.position.y.toFixed(2)}`);
+  // openTime(4초) 이 지나면 닫힌다. 단 누가 문을 넘어가면 forceOpen 으로
+  // 계속 열리므로, 여기서는 문 앞(z=-4)에 남겨 둔 채로 잰다.
+  r.step(60 * 5);
+  check("openTime 이 지나면 다시 닫힌다", gate.position.y > 0.5, `y=${gate.position.y.toFixed(2)}`);
+}
+{
+  // ---- 혼자서는 못 연다: 규칙이 아니라 **거리와 시간**이 막는다
+  //
+  // [무엇이 보증인가] latch 는 "밟은 뒤 이 시간 동안만 켜져 있다"이므로,
+  // 그 시간 안에 반대쪽 발판에 도착할 수만 있다면 혼자서도 열린다.
+  // 그러니 잠가야 할 것은 latch 자체가 아니라 **발판 사이를 사람이 latch 안에
+  // 건널 수 없다**는 부등식이다. (텔레포트로 옮기면 당연히 열린다 —
+  //  그건 코드의 결함이 아니라 이 설계가 지형에 기대고 있다는 뜻이고,
+  //  그래서 스테이지가 발판 간격을 좁히면 이 장치는 그 자리에서 무의미해진다.)
+  const GAP = 9.2;                        // 발판 x = ±4.6
+  const LATCH = 1.2;
+  const need = GAP / P.maxSpeed;          // 최고 속도로도 걸리는 최소 시간
+  console.log(`       발판 사이 ${GAP}m / 최고 속도 ${P.maxSpeed} m/s -> 최소 ${need.toFixed(2)}초 vs latch ${LATCH}초`);
+  check("사람 최고 속도로도 latch 안에 건널 수 없다", need > LATCH * 1.3,
+    `필요 ${need.toFixed(2)}초 · latch ${LATCH}초`);
+
+  // 실제로 걸어서 건너면 첫 신호가 꺼져 있다
+  const r2 = build(DUAL);
+  const s2 = r2.addRagdoll(-4.6, 0);
+  r2.step(40);
+  check("첫 발판 신호가 켜져 있다", r2.obstacles.signalActive(3));
+  s2.reset(new CANNON.Vec3(4.6, P.rideHeight, 0));
+  r2.step(Math.round(need * 60));
+  check("건너가는 시간이면 첫 신호가 꺼져 있다", r2.obstacles.signalAll(3) === false);
+}
+
+// ---------------------------------------------------------------- 10. 프레스
+console.log("\n--- TEST 10: 프레스 (press) ---");
+{
+  const r = build([{ kind: "press", z: 0, x: 0,
+    params: { w: 5, len: 3, period: 3.6, downFrac: 0.3, speed: 6, topY: 4.2, bottomY: 0.25 } }]);
+  const b = r.obstacles.stations[0].body;
+  let minY = b.position.y, maxY = b.position.y;
+  for (let i = 0; i < 60 * 8; i++) { r.step(); minY = Math.min(minY, b.position.y); maxY = Math.max(maxY, b.position.y); }
+  const h = OB.pressH;
+  check("바닥까지 내려온다", minY < 0.25 + h * 0.5 + 0.1, `minY=${minY.toFixed(2)}`);
+  check("사람 키 위까지 올라간다", maxY > 4.2 + h * 0.5 - 0.1, `maxY=${maxY.toFixed(2)}`);
+  check("x/z 는 고정", Math.abs(b.position.x) < 1e-6 && Math.abs(b.position.z) < 1e-6);
+}
+{
+  // 아래 서 있으면 넘어진다 — 그리고 **판 밑에서 벗어난다.**
+  //
+  // 여기서 재는 것이 "몇 미터 밀렸나"가 아니라 "판 밑을 벗어났나"인 이유:
+  // 쿨다운(2.4초)이 주기(3.6초)보다 짧아서, 판 밑에 남으면 다음 주기에 또
+  // 맞고 그 다음에도 맞는다. `OB.spinY` 주석이 경고한 무한 루프 그대로다.
+  const W = 5, L = 3;
+  const r = build([{ kind: "press", z: 0, x: 0,
+    params: { w: W, len: L, period: 3.6, downFrac: 0.3, speed: 6, topY: 4.2, bottomY: 0.25 } }]);
+  const rag = r.addRagdoll(0.4, 0);   // 한가운데 근처 = 제일 나가기 어려운 자리
+  r.step(30);
+  const base = r.hits();
+  const SEC = 12;
+  r.step(60 * SEC);
+  const hit = r.hits() - base;
+  const q = rag.pelvis.position;
+  // 주기 3.6초 -> 12초에 3회 내려온다. 쿨다운 4.2초면 그중 최대 2~3회만 맞는다.
+  const cycles = Math.floor(SEC / 3.6);
+  console.log(`       가만히 있는 사람: ${SEC}초에 프레스가 ${cycles}번 내려왔고 ${hit}번 맞았다 / 끝난 자리 (${q.x.toFixed(2)}, ${q.z.toFixed(2)})`);
+  check("아래 있으면 맞는다", hit >= 1);
+  // 넉백만으로는 판정 범위(반길이 1.5 + 여유 0.42)를 못 벗어난다 — 실측 1.5m.
+  // 그래서 무한 루프를 막는 것은 거리가 아니라 **쿨다운(4.2초 > 주기 3.6초)**이다.
+  check("매 주기 찍히지는 않는다 (쿨다운 > 주기)", hit < cycles || hit <= Math.ceil(SEC / OB.pressHitCooldown),
+    `${hit}회 / 내려온 횟수 ${cycles}`);
+}
+{
+  // 실제 상황: 맞은 뒤 걸어 나가면 벗어난다. 사람은 동상이 아니다.
+  const W = 5, L = 3;
+  const r = build([{ kind: "press", z: 0, x: 0,
+    params: { w: W, len: L, period: 3.6, downFrac: 0.3, speed: 6, topY: 4.2, bottomY: 0.25 } }]);
+  const rag = r.addRagdoll(0.4, 0);
+  r.step(30);
+  // 찍히기를 기다렸다가, 그 뒤로는 +Z 로 걸어 나온다
+  for (let i = 0; i < 60 * 4; i++) r.step(1, { moveX: 0, moveZ: 1, jump: false });
+  const q = rag.pelvis.position;
+  const out = Math.abs(q.z) > L / 2 + OB.hitPad;
+  check("걸어 나가면 판정 범위를 벗어난다", out, `z=${q.z.toFixed(2)} (판정 ${(L / 2 + OB.hitPad).toFixed(2)})`);
+  check("벗어난 뒤에는 안 맞는다", rag.state === "ACTIVE" || out, `state=${rag.state}`);
+}
+{
+  // 프레스는 범용 KNOCKS 목록에 없다 — 자기 판정을 쓴다.
+  // 판 **위**(올라간 판보다 높은 곳)에 있으면 안 맞는다.
+  const r = build([{ kind: "press", z: 0, x: 0,
+    params: { w: 5, len: 3, period: 3.6, downFrac: 0.3, speed: 6, topY: 4.2, bottomY: 0.25 } }]);
+  const rag = r.addRagdoll(9, 0);   // 판 폭(±2.5) 바깥
+  r.step(30);
+  let knocked = false;
+  for (let i = 0; i < 60 * 6; i++) { r.step(); if (rag.state !== "ACTIVE") knocked = true; }
+  check("판 바깥에 서 있으면 안 맞는다", !knocked);
+}
+
+// ---------------------------------------------------------------- 11. 빙판
+console.log("\n--- TEST 11: 빙판 (ice) ---");
+{
+  /** 달리다 입력을 끊고 stopN 스텝 동안 얼마나 더 가는가 */
+  function slideDist(onIce: boolean): number {
+    const r = build(onIce
+      ? [{ kind: "ice", z: -6, x: 0, params: { w: 14, len: 26, slip: 0.82 } }]
+      : []);
+    const rag = r.addRagdoll(0, 4);
+    r.step(30);
+    r.step(90, { moveX: 0, moveZ: -1, jump: false });   // 전속력까지
+    const z0 = rag.pelvis.position.z;
+    r.step(45);                                         // 입력을 끊는다
+    return z0 - rag.pelvis.position.z;
+  }
+  const plain = slideDist(false);
+  const ice = slideDist(true);
+  console.log(`       평지 ${plain.toFixed(2)}m / 빙판 ${ice.toFixed(2)}m (입력을 끊고 0.75초)`);
+  check("빙판에서는 브레이크가 덜 듣는다", ice > plain * 1.4, `평지 ${plain.toFixed(2)} 빙판 ${ice.toFixed(2)}`);
+  check("그래도 무한히 미끄러지지는 않는다", ice < 6, `${ice.toFixed(2)}m`);
+}
+{
+  // 공은 감쇠가 작아져서 훨씬 멀리 굴러간다
+  function ballRoll(onIce: boolean): number {
+    const r = build(onIce
+      ? [{ kind: "ice", z: -14, x: 0, params: { w: 14, len: 40, slip: 0.82 } }]
+      : [], [0, B.radius + 0.01, 0]);
+    r.ball.velocity.set(0, 0, -7);
+    r.ball.angularVelocity.set(-7 / B.radius, 0, 0);
+    r.step(60 * 3);
+    return -r.ball.position.z;
+  }
+  const plain = ballRoll(false);
+  const ice = ballRoll(true);
+  console.log(`       공: 평지 ${plain.toFixed(2)}m / 빙판 ${ice.toFixed(2)}m (3초)`);
+  check("빙판에서 공이 더 굴러간다", ice > plain, `평지 ${plain.toFixed(2)} 빙판 ${ice.toFixed(2)}`);
+}
+{
+  // 구역을 벗어나면 공의 감쇠가 원래대로 돌아온다 (안 되돌리면 코스 전체가 빙판이 된다)
+  const r = build([{ kind: "ice", z: 0, x: 0, params: { w: 6, len: 4 } }], [0, B.radius + 0.01, 0]);
+  const homeLd = r.ball.linearDamping;
+  r.step(5);
+  check("빙판 안에서는 감쇠가 작다", r.ball.linearDamping < homeLd);
+  r.ball.position.set(0, B.radius + 0.01, -20);
+  r.step(5);
+  check("빙판을 벗어나면 원래 감쇠로 돌아온다",
+    Math.abs(r.ball.linearDamping - homeLd) < 1e-9,
+    `${r.ball.linearDamping} vs ${homeLd}`);
+}
+
+// ---------------------------------------------------------------- 12. 범퍼 / 점프 패드
+console.log("\n--- TEST 12: 범퍼 · 점프 패드 ---");
+{
+  const r = build([{ kind: "bumper", z: -4, x: 0, params: { r: 1.1 } }], [0, B.radius + 0.01, 0]);
+  r.ball.velocity.set(0, 0, -6);
+  let bounced = false;
+  for (let i = 0; i < 60 * 2 && !bounced; i++) { r.step(); if (r.ball.velocity.z > 2) bounced = true; }
+  check("공이 반대로 튕겨 나온다", bounced, `vz=${r.ball.velocity.z.toFixed(2)}`);
+  const fxs = r.obstacles.takeFx();
+  check("사건이 fx 로 나온다 (넉백 hits 가 아니라)", fxs.some((f) => f.kind === "bumper" && f.rag === null));
+  check("takeFx() 는 한 번 가져가면 비워진다", r.obstacles.takeFx().length === 0);
+}
+{
+  // 달려와 박으면 넘어진다. 걸어서 스치면 안 넘어진다.
+  function bump(speedInput: number): boolean {
+    const r = build([{ kind: "bumper", z: -4, x: 0, params: { r: 1.1 } }]);
+    const rag = r.addRagdoll(0, 2);
+    r.step(30);
+    let knocked = false;
+    for (let i = 0; i < 60 * 3; i++) {
+      r.step(1, { moveX: 0, moveZ: -speedInput, jump: false });
+      if (rag.state !== "ACTIVE") knocked = true;
+    }
+    return knocked;
+  }
+  check("달려와 박으면 넘어진다", bump(1));
+}
+{
+  const r = build([{ kind: "jumppad", z: 0, x: 0, params: { r: 1.6, up: 9.5 } }]);
+  const rag = r.addRagdoll(0, 0);
+  r.step(3);
+  const top = rag.pelvis.position.y;
+  let maxY = top;
+  for (let i = 0; i < 40; i++) { r.step(); maxY = Math.max(maxY, rag.pelvis.position.y); }
+  check("사람이 위로 뜬다", maxY > P.rideHeight + 1.2, `maxY=${maxY.toFixed(2)}`);
+  check("점프 패드도 fx 로 나온다", r.obstacles.takeFx().some((f) => f.kind === "jumppad"));
+}
+{
+  const r = build([{ kind: "jumppad", z: 0, x: 0, params: { r: 1.6, up: 9.5 } }], [0, B.radius + 0.01, 0]);
+  let maxY = r.ball.position.y;
+  for (let i = 0; i < 60; i++) { r.step(); maxY = Math.max(maxY, r.ball.position.y); }
+  check("공도 위로 뜬다", maxY > 1.5, `maxY=${maxY.toFixed(2)}`);
+}
+
+// ---------------------------------------------------------------- 13. 돌풍
+console.log("\n--- TEST 13: 바람이 켜졌다 꺼진다 (period / onFrac) ---");
+{
+  const r = build([{ kind: "wind", z: 0, x: 0,
+    params: { dirX: 1, dirZ: 0, force: 26, w: 20, len: 20, period: 4, onFrac: 0.5 } }],
+    [0, B.radius + 0.01, 0]);
+  const on: boolean[] = [];
+  for (let i = 0; i < 60 * 4; i++) { r.step(); on.push(r.obstacles.stations[0].signalOn); }
+  const onCount = on.filter(Boolean).length;
+  check("주기의 절반만 분다", Math.abs(onCount / on.length - 0.5) < 0.06,
+    `${(onCount / on.length * 100).toFixed(0)}%`);
+  // 꺼져 있는 동안에는 공이 안 밀린다
+  const r2 = build([{ kind: "wind", z: 0, x: 0,
+    params: { dirX: 1, dirZ: 0, force: 26, w: 20, len: 20, period: 4, onFrac: 0.5, } }],
+    [0, B.radius + 0.01, 0]);
+  // phase 를 켜진 구간 뒤(=꺼진 구간)로 옮긴다
+  r2.obstacles.stations[0].clock = 2.05;
+  const x0 = r2.ball.position.x;
+  r2.step(60);
+  check("꺼져 있는 동안에는 공이 안 밀린다", Math.abs(r2.ball.position.x - x0) < 0.2,
+    `dx=${(r2.ball.position.x - x0).toFixed(3)}`);
 }
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);

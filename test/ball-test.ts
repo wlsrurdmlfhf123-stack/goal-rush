@@ -376,5 +376,55 @@ console.log("\n--- TEST 9: 킥은 이동이 아니라 '보는 쪽'으로 나간�
   }
 }
 
+console.log("\n--- TEST 10: 멈춰 있는 공도 세게 찰 수 있다 (HANDOFF B5) ---");
+{
+  /** 공이 조용해질 때까지 두고, 한 번 차서 그 뒤 최고 속도를 잰다 */
+  function kickTop(dribbling: boolean, power: number): number {
+    const r = build([0, -1.2]);
+    const mz = dribbling ? -1 : 0;
+    for (let i = 0; i < 120; i++) r.step(0, mz);
+    r.step(0, mz, { aim: [0, -1], kick: true, kickPower: power });
+    let top = Math.hypot(r.ball.velocity.x, r.ball.velocity.z);
+    for (let i = 0; i < 45; i++) {
+      r.step(0, mz);
+      top = Math.max(top, Math.hypot(r.ball.velocity.x, r.ball.velocity.z));
+    }
+    return top;
+  }
+
+  const still0 = kickTop(false, 0);
+  const still5 = kickTop(false, 0.5);
+  const still1 = kickTop(false, 1);
+  const drib1 = kickTop(true, 1);
+  console.log(`       정지한 공  톡 ${still0.toFixed(2)} / 반 ${still5.toFixed(2)} / 풀 ${still1.toFixed(2)} m/s`);
+  console.log(`       드리블 중  풀 ${drib1.toFixed(2)} m/s`);
+
+  // [무엇이 문제였나] 보정 전에는 정지 3.73 / 6.31 / 8.89 vs 드리블 13.50 이라
+  // **멈춰서 자세 잡고 세게 차는 쪽이 훨씬 약했다.** 바닥에 붙어 자고 있는
+  // 공은 첫 스텝의 접촉이 충격량을 크게 먹기 때문이다(B.slowKickBoost 주석).
+  // 세트피스 슛이라는 플레이가 성립하려면 둘이 비슷해야 한다.
+  check("정지한 공의 풀차지가 드리블 킥과 비슷해졌다",
+    still1 > drib1 * 0.85, `정지 ${still1.toFixed(2)} vs 드리블 ${drib1.toFixed(2)}`);
+  // 반대로 정지 킥이 **더 세지면** 안 된다. 그러면 이번엔 반대로 기울고,
+  // 사람을 넘어뜨리는 문턱(13 m/s)을 세워 놓고 차는 것만으로 넘게 된다.
+  check("그렇다고 드리블 킥보다 세지지는 않았다",
+    still1 < drib1 * 1.15, `정지 ${still1.toFixed(2)} vs 드리블 ${drib1.toFixed(2)}`);
+  // 차징 곡선의 모양은 그대로다 (보정이 비율이라 순서가 안 바뀐다)
+  check("차징이 셀수록 세다", still0 < still5 && still5 < still1,
+    `${still0.toFixed(2)} < ${still5.toFixed(2)} < ${still1.toFixed(2)}`);
+  // 톡 치는 킥은 여전히 "밀어 놓는" 세기여야 한다 (드리블의 연장)
+  check("톡 치는 킥은 여전히 약하다", still0 < 6.5, `${still0.toFixed(2)} m/s`);
+
+  // [이 보정이 굴러가는 공에는 안 걸린다] 이게 이 변경의 안전선이다.
+  // slowKickAt(1.6 m/s) 위의 공에는 배수가 1.0 이므로 예전 킥과 완전히 같다.
+  {
+    const r = build([0, -1.2]);
+    for (let i = 0; i < 120; i++) r.step(0, -1);
+    const speed = Math.hypot(r.ball.velocity.x, r.ball.velocity.z);
+    check("드리블 중인 공은 보정 문턱 위에 있다", speed > B.slowKickAt,
+      `${speed.toFixed(2)} vs ${B.slowKickAt}`);
+  }
+}
+
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

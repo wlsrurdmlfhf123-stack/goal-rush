@@ -37,9 +37,16 @@ export type LiveGimmick = ObstacleKind;
  * 이름은 "무엇을 하는 물건인가"로 짓는다 — 어느 스테이지에서 쓰는지로 지으면
  * (`stage5wind` 같은) 다른 스테이지에서 재사용할 때 이름이 거짓말이 된다.
  */
-export type PlannedGimmick =
-  | "press"      // 위에서 내려와 찍었다 올라가는 판
-  | "thief";     // 공을 빼앗아 도망가는 AI
+/**
+ * 스테이지 설계가 요구하지만 아직 **장애물 런타임**이 없는 기믹.
+ *
+ * [thief 는 왜 여기 없나] 「공을 빼앗아 도망가는 AI」는 장애물이 아니라
+ * **봇의 역할**로 만들었다 (`bot.ts` 의 `BotRole = "thief"`). 그래야 이미
+ * 있는 것을 전부 재사용한다 — 봇은 그냥 래그돌이라 걷기/넘어짐/일어남/충돌이
+ * 사람과 똑같이 돌고, 스냅샷 동기화도 공짜다. 장애물로 만들었다면 그 전부를
+ * 새로 짜야 했다. 스테이지는 `MapDef.botSpawns` + `botRoles` 로 배치한다.
+ */
+export type PlannedGimmick = never;
 
 export type GimmickKind = LiveGimmick | PlannedGimmick;
 
@@ -101,19 +108,26 @@ export const GIMMICK_STATUS: Record<GimmickKind, "live" | "planned"> = {
   lever: "live",
   holdgate: "live",
 
-  press: "planned",
-  thief: "planned",
+  // 2인 협동 개편에서 붙은 것들 (프레스 / 둘이 미는 문 / 빙판 / 범퍼 / 점프패드)
+  press: "live",
+  pushblock: "live",
+  ice: "live",
+  bumper: "live",
+  jumppad: "live",
 };
 
 export function isLive(kind: GimmickKind): kind is LiveGimmick {
   return GIMMICK_STATUS[kind] === "live";
 }
 
-/** planned 기믹의 표식 색 — 종류마다 달라야 배치가 눈으로 구분된다 */
-const PLACEHOLDER_COLOR: Record<PlannedGimmick, number> = {
-  press: 0xff5d73,
-  thief: 0xc490ff,
-};
+/**
+ * planned 기믹의 표식 색 — 종류마다 달라야 배치가 눈으로 구분된다.
+ *
+ * 지금은 planned 기믹이 하나도 없다(`PlannedGimmick = never`). 목록을 지우지
+ * 않고 비워 두는 이유는, 다음 기믹을 선언하는 사람이 이 자리에 색만 더하면
+ * 표식 경로가 그대로 살아나기 때문이다.
+ */
+const PLACEHOLDER_COLOR: Partial<Record<GimmickKind, number>> = {};
 
 /**
  * 아직 런타임이 없는 기믹의 자리 표시.
@@ -125,8 +139,7 @@ const PLACEHOLDER_COLOR: Record<PlannedGimmick, number> = {
  * 진짜 벽처럼 굴면 없는 기믹이 길을 막는 셈이 된다.
  */
 export function drawGimmickPlaceholder(b: Build, g: GimmickSpec) {
-  const kind = g.kind as PlannedGimmick;
-  const color = PLACEHOLDER_COLOR[kind] ?? 0xffffff;
+  const color = PLACEHOLDER_COLOR[g.kind] ?? 0xffffff;
   const x = g.x ?? 0;
   const p = g.params ?? {};
   const w = p.w ?? p.width ?? 3.2;
