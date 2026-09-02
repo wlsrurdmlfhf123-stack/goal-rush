@@ -3388,10 +3388,16 @@ function fixedUpdate(dt: number) {
     // 진행하면 위치는 기존 objects 스냅샷을 타고 클라이언트로 간다.
     if (playing) {
       const rags = [...playersById.values()].map((e) => e.rag);
+      // [협동 장치는 사람만 센다] playersById 에는 봇이 같이 들어 있다(위 주석).
+      // 그대로 넘기면 봇이 레버를 밟고 버튼 문 발판을 누르고 미는 문을 밀고,
+      // 심지어 문을 지나간 것만으로 그 문이 영구 개방됐다 — 스테이지 2 의 첫
+      // 버튼 문에서 실제로 그랬다. 몸이 있는 쪽(맞고 튕기고 실려 감)은 전부
+      // 넘기고, 협동 판정용으로 사람 목록을 따로 준다 (obstacles.ts update 주석).
+      const humanRags = [...playersById.values()].filter((e) => !isBot(e.id)).map((e) => e.rag);
       // 코스 장애물(회전봉/피스톤/거대 공)도 같은 방식으로 진행한다.
       // 회전봉과 피스톤은 kinematic이라 부딪힌 쪽이 실제로 밀려나고,
       // 거대 공에 맞은 사람만 여기서 넉백 처리를 받는다.
-      const obHits = obstacles.update(dt, rags, ballBody() ?? undefined);
+      const obHits = obstacles.update(dt, rags, ballBody() ?? undefined, humanRags);
       // 범퍼에 튕겼다 / 점프 패드를 밟았다 — 넉백과 성격이 달라서 따로 온다
       // (obstacles.ts ObstacleFx 주석). 연출만 붙이고 캐리는 건드리지 않는다.
       for (const f of obstacles.takeFx()) {
@@ -3844,15 +3850,30 @@ if (DEBUG) {
       // 공을 최근에 건드린 사람들 (협동 골 어시스트)
       touched: [...ballTouchedAt.keys()],
       signals: obstacles.signals(),
+      // x/half 는 **실제 collider(shape.halfExtents)에서 읽는다.** 상수를 여기
+       // 다시 적으면 world.ts 를 고쳤을 때 조용히 어긋난다. 문틀 좌우가 막혀
+       // 있으므로 지나갈 수 있는 곳은 [x-half, x+half] 뿐이다.
       gates: obstacles.stations
         .filter((s) => ["coopgate", "buttongate", "holdgate"].includes(s.spec.kind))
         .map((s) => ({
           kind: s.spec.kind, z: s.spec.z,
+          x: +s.body.position.x.toFixed(2),
+          half: s.body.shapes[0] instanceof CANNON.Box
+            ? +(s.body.shapes[0] as CANNON.Box).halfExtents.x.toFixed(2) : 0,
           // 문이 바닥 아래로 내려가 있으면 열린 것이다 (OB.gateSink)
           open: s.body.position.y < 0,
           y: +s.body.position.y.toFixed(2),
         })),
-      push: obstacles.pushBlocks().map((p) => ({ z: p.z, off: +p.off.toFixed(2), done: p.done })),
+      push: obstacles.stations
+        .filter((s) => s.spec.kind === "pushblock")
+        .map((s) => {
+          const pb = obstacles.pushBlocks().find((p) => p.z === s.spec.z)!;
+          return {
+            z: pb.z, x: pb.x, off: +pb.off.toFixed(2), done: pb.done,
+            half: s.body.shapes[0] instanceof CANNON.Box
+              ? +(s.body.shapes[0] as CANNON.Box).halfExtents.x.toFixed(2) : 0,
+          };
+        }),
     }),
   };
 }

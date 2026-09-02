@@ -65,6 +65,50 @@
       var tx, tz;
       if (dB > 2.2) { tx = b[0]; tz = b[2]; } else { tx = goal.x; tz = goal.z; }
 
+      // [문틀 통과] 게이트/미는 문은 좌우가 문틀로 막혀 있고 가운데만 뚫려
+      // 있다. 사람은 문이 보이니까 알아서 가운데로 들어가지만, 이 봇은 목표를
+      // 향해 직진할 뿐이라 문틀에 처박혀 그대로 멈춘다.
+      //
+      // 실측으로 두 가지가 따로 필요했다.
+      //  1. 사람이 통로 정면으로 가야 한다  (s1: x=-5 로 붙어 z=-61.6 에 30초 정체)
+      //  2. **공을 통로 쪽으로 몰아야 한다**  (s2: 공이 x=-5.5 에서 문틀에 붙고
+      //     봇이 그 공을 벽으로 계속 밀어 z=-17 에 60초 정체)
+      // 2를 풀려면 공 뒤(문 반대편)로 돌아가서 밀어야 한다 — 축구봇이 늘 하는
+      // 그 동작인데 이 하네스에는 없었다.
+      var doors = [];
+      try {
+        var cp = d.coop();
+        for (var gi = 0; gi < cp.gates.length; gi++) doors.push(cp.gates[gi]);
+        for (var pi = 0; pi < cp.push.length; pi++) doors.push(cp.push[pi]);
+      } catch (e) { /* coop() 이 없는 옛 빌드면 그냥 건너뛴다 */ }
+      for (var di = 0; di < doors.length; di++) {
+        var dr = doors[di];
+        if (!dr.half) continue;
+        var lane = dr.half - 0.6;                       // 몸 폭 여유
+
+        // (a) **공이 문 바로 앞에서 통로 밖에 붙어 있다** = 벽에 밀어붙이는 중이다.
+        //     공 뒤(문 반대편)로 돌아가 통로 쪽으로 민다.
+        //     공을 버리고 가지 않도록 **내가 공 근처일 때만** 한다.
+        var nearDoorBall = Math.abs(b[2] - dr.z) < 6 && Math.abs(b[0] - dr.x) > lane;
+        if (nearDoorBall && dB < 4.5) {
+          var mouthZ = b[2] > dr.z ? dr.z + 2.5 : dr.z - 2.5;
+          var ux = b[0] - dr.x, uz = b[2] - mouthZ;
+          var ul = Math.hypot(ux, uz) || 1;
+          var standX = b[0] + (ux / ul) * 1.5, standZ = b[2] + (uz / ul) * 1.5;
+          if (Math.hypot(p[0] - standX, p[2] - standZ) > 1.0) { tx = standX; tz = standZ; }
+          else { tx = dr.x; tz = mouthZ; }              // 자리를 잡았으면 밀어 넣는다
+          break;
+        }
+
+        // (b) 문이 **나와 목표 사이**에 있으면 통로 정면으로 x 를 맞춘다
+        var betweenD = (p[2] > dr.z && tz < dr.z) || (p[2] < dr.z && tz > dr.z);
+        if (!betweenD) continue;
+        if (Math.abs(p[0] - dr.x) <= lane) break;       // 이미 통로 정면이다
+        tx = dr.x;
+        tz = p[2] > dr.z ? Math.max(tz, dr.z + 3) : Math.min(tz, dr.z - 3);
+        break;
+      }
+
       // [공 전용 틈 우회] 사람은 틈을 통과할 수 없다. 나와 목표 사이에
       // 틈이 끼어 있으면 곧장 가지 말고 옆길(x=±6.2)로 돌아간다.
       // 이걸 모르면 벽에 계속 처박혀서 레벨이 막힌 것처럼 보인다 -

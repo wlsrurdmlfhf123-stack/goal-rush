@@ -969,7 +969,28 @@ export function createObstacles(world: World, laneHalf: number) {
     for (const s of stations) if (s.signalOn && s.spec.link !== undefined) out.add(s.spec.link);
     return [...out].sort((a, b) => a - b);
   }
-  function update(dt: number, players: Ragdoll[], ball?: CANNON.Body): ObstacleHit[] {
+  /**
+   * 한 스텝 진행한다.
+   *
+   * [players 와 humans 를 왜 나누는가 — 봇이 협동 장치를 대신 눌러 주고 있었다]
+   * main.ts 는 봇을 사람과 같은 `playersById` 에 넣는다 (봇도 래그돌이라
+   * 스폰/물리/스냅샷/피격이 전부 공짜로 따라오기 때문이다). 그 목록이 그대로
+   * 여기 들어와서 **협동 장치가 봇을 사람으로 셌다.** 스테이지 2 의 첫 버튼
+   * 문(z=-20)은 방해꾼 봇이 발판을 밟거나 문을 지나가는 것만으로 열렸고,
+   * 한 번 지나가면 forceOpen 으로 그 판 내내 열린 채로 남았다 —
+   * 「한 명이 눌러주고 다른 한 명이 지나간다」가 통째로 사라진 것이다.
+   *
+   * 그래서 목록을 둘로 받는다.
+   *   players — **몸이 있는 전부**. 맞고 튕기고 실려 가는 쪽이다
+   *             (프레스/범퍼/점프패드/빙판/컨베이어/바람/발판 승객).
+   *             봇도 당연히 맞고 실려야 하므로 여기서 빼면 안 된다.
+   *   humans  — **사람만**. 협동 장치의 판정 대상이다
+   *             (레버 밟음 / 버튼 문 발판 / 「지나갔음」 잠금 / 미는 문의 힘).
+   *             생략하면 players 와 같다 (테스트 rig 처럼 봇이 없는 경우).
+   *
+   * 개폐 규칙은 한 줄도 안 바꿨다 — **누구를 세는가**만 좁혔다.
+   */
+  function update(dt: number, players: Ragdoll[], ball?: CANNON.Body, humans: Ragdoll[] = players): ObstacleHit[] {
     const hits: ObstacleHit[] = [];
     // 이번 스텝의 범퍼/점프패드 사건. main.ts 가 takeFx() 로 가져간다.
     const fxOut = fxQueue;
@@ -1088,7 +1109,7 @@ export function createObstacles(world: World, laneHalf: number) {
             // 그래서 발판 하나만 밟혀 있으면 열린 것으로 본다. 발판이 둘인
             // 건 "아무 쪽이나 서면 된다"는 뜻이 된다.
             let held = false;
-            for (const rag of players) {
+            for (const rag of humans) {
               if (rag.state !== "ACTIVE") continue;
               const p = rag.pelvis.position;
               if (p.y > OB.btnPadMaxY) continue;
@@ -1103,7 +1124,7 @@ export function createObstacles(world: World, laneHalf: number) {
             // 있는 동안 누가 문을 넘어갔으면 그 뒤로는 계속 열어 둔다 -
             // 안 그러면 눌러준 사람이 반대편에 영영 남는다.
             if (held) {
-              for (const rag of players) {
+              for (const rag of humans) {
                 if (rag.pelvis.position.z < s.spec.z - OB.gateD) { s.forceOpen = true; break; }
               }
             }
@@ -1128,7 +1149,7 @@ export function createObstacles(world: World, laneHalf: number) {
             // 쪽도 결국 건너야 하는데, 레버에서 발을 떼면 문이 닫혀 버린다.
             // 누군가 문을 넘어간 뒤에는 계속 열어 둔다.
             if (s.opened) {
-              for (const rag of players) {
+              for (const rag of humans) {
                 if (rag.pelvis.position.z < s.spec.z - OB.gateD) { s.forceOpen = true; break; }
               }
             }
@@ -1166,7 +1187,7 @@ export function createObstacles(world: World, laneHalf: number) {
             s.opened = s.forceOpen || allOn;
           }
           if (s.opened) {
-            for (const rag of players) {
+            for (const rag of humans) {
               if (rag.pelvis.position.z < s.spec.z - OB.gateD) { s.forceOpen = true; break; }
             }
           }
@@ -1185,7 +1206,7 @@ export function createObstacles(world: World, laneHalf: number) {
           const pw = (s.spec.params?.w ?? OB.leverW) * 0.5;
           const pl = (s.spec.params?.len ?? OB.leverD) * 0.5;
           let stepped = false;
-          for (const rag of players) {
+          for (const rag of humans) {
             const q = rag.pelvis.position;
             if (q.y > OB.leverMaxY) continue;
             if (Math.abs(q.x - s.px) > pw) continue;
@@ -1455,7 +1476,7 @@ export function createObstacles(world: World, laneHalf: number) {
             else s.pushers.set(rag, nt);
           }
           let sum = 0;   // 밀리는 방향 성분의 합 (+/-)
-          for (const rag of touchersOf(b, players)) {
+          for (const rag of touchersOf(b, humans)) {
             if (rag.state !== "ACTIVE") continue;
             const want = axis === 0 ? rag.intentX : rag.intentZ;
             // 상자 쪽으로 향하고 있는가 (사람 -> 상자 방향과 입력의 부호가 같은가)
@@ -1812,17 +1833,54 @@ export function createObstacles(world: World, laneHalf: number) {
   }
 
   /**
+   * 혼자서 **켜 놓고 그 자리를 떠날 수 있는** 트리거인가.
+   *
+   * 이게 「싱글에서 이 문을 열 수 있는가」를 가르는 진짜 기준이다.
+   *   공 소켓 - 공을 굴려 넣어 두면 계속 켜져 있다 -> 혼자 가능
+   *   레버 hold=0 - 한 번 밟으면 유지된다 -> 혼자 가능
+   *   레버 hold=1 - **밟고 있는 동안만** 켜진다 -> 발을 떼면 꺼지므로 혼자 불가능
+   *   레버 latch>0 - 밟고 latch 초 뒤에 꺼진다 -> 문까지 못 가면 혼자 불가능
+   */
+  const soloHoldable = (s: Station) => {
+    if (s.spec.kind === "ballsocket") return true;
+    if (s.spec.kind !== "lever") return false;
+    if ((s.spec.params?.latch ?? OB.leverLatch) > 0) return false;
+    return (s.spec.params?.hold ?? 1) < 0.5;
+  };
+
+  /** 그 채널의 트리거를 혼자서 전부 켜 놓을 수 있는가 (트리거가 없으면 불가능) */
+  function soloCanSignal(ch?: number): boolean {
+    if (ch === undefined) return false;
+    let n = 0;
+    for (const s of stations) {
+      if (s.spec.link !== ch || !isTrigger(s)) continue;
+      n++;
+      if (!soloHoldable(s)) return false;
+    }
+    return n > 0;
+  }
+
+  /**
    * 사람이 둘 이상 있어야 열 수 있는 관문인가 (싱글에서 자동으로 열어 줄 대상).
    *
    * [혼자서 풀 수 있는 문은 열어 주지 않는다] 공 소켓 하나로 열리는 문은
    * 싱글에서도 공만 굴려 넣으면 되므로 공짜로 열면 퍼즐이 사라진다.
-   * 반대로 레버가 둘 이상 달린 holdgate 는 혼자서는 절대 못 여니 열어 준다
-   * (안 그러면 싱글에서 그 자리에서 진행이 막힌다).
+   *
+   * [「link 가 있으면 혼자 열 수 있다」는 틀렸다 — 실측으로 드러났다]
+   * 예전에는 link 가 걸린 문을 전부 "자기 트리거로 열 수 있다"고 보고 싱글
+   * 자동 개방에서 뺐다. 그런데 스테이지 2의 문(z=-54)은 트리거가 **밟고
+   * 있는 동안만** 켜지는 레버(hold=1)이고 문에서 8m 떨어져 있다. 혼자서는
+   * 레버에서 발을 떼는 순간 문이 닫히므로 **원리적으로 못 지나간다.**
+   * 그동안 이게 안 드러난 이유는 문 옆이 4m 뚫려 있어서 그냥 돌아갔기
+   * 때문이다. 문틀을 세워 그 구멍을 막자 싱글 완주가 그 자리에서 멈췄다.
+   * 그래서 link 유무가 아니라 **트리거를 혼자 켜 놓을 수 있는가**를 본다.
    */
   const isCoopGate = (s: Station) => {
     if (s.spec.kind === "buttongate") return true;
-    if (s.spec.kind === "coopgate") return s.spec.link === undefined;   // 패스 게이트
-    if (s.spec.kind === "holdgate") return triggerCount(s.spec.link) >= 2;
+    // 패스 게이트(link 없음)는 받아 줄 사람이 없으니 혼자서는 못 연다
+    if (s.spec.kind === "coopgate") return s.spec.link === undefined || !soloCanSignal(s.spec.link);
+    // 신호 문은 채널의 트리거를 전부 켜 놓을 수 있어야 혼자 연다
+    if (s.spec.kind === "holdgate") return triggerCount(s.spec.link) >= 2 || !soloCanSignal(s.spec.link);
     // 밀어야 하는 문은 한 사람 몫의 힘으로는 정지 마찰을 못 넘는다 = 혼자면
     // 원리적으로 불가능하다. 싱글에서는 끝까지 밀린 자리에 세워 둔다.
     if (s.spec.kind === "pushblock") return true;

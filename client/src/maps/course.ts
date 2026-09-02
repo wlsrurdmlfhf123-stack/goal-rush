@@ -201,6 +201,41 @@ export const TUTORIAL_PADS: [number, string, number][] = [
 /** 패드 판정 반지름 (z 기준). 이 안에 들어오면 그 단계 안내가 뜬다 */
 export const TUTORIAL_PAD_HALF = 2.6;
 
+/**
+ * 문틀의 최소 높이 (m).
+ *
+ * 점프 최고 높이가 골반 y=1.66(평지 0.86에서 +0.80)이므로 발이 올라설 수 있는
+ * 턱은 0.8m 남짓이다. 2.0m면 뛰어올라 걸터앉을 수 없다.
+ * 실제로는 게이트 높이(2.6) 쪽이 커서 이 값이 쓰이는 건 미는 문(2.2)뿐이다.
+ */
+const FRAME_MIN_H = 2.0;
+
+/**
+ * 이 기믹이 「레인을 막는 문」인가. 맞으면 그 **통로**의 치수를 돌려준다.
+ *
+ * [world.ts 와 반드시 같은 값이어야 한다] 여기서 돌려주는 half/h/depth 는
+ * `world.ts` 의 `addObstacle` 이 만드는 **collider 치수와 같은 식**으로 계산한다.
+ * 한쪽만 바꾸면 문틀과 문 사이에 틈이 생기거나 겹친다.
+ * (`test:map` 의 「gate side bypass」 검사가 이 일치를 매번 확인한다)
+ */
+function gateOpening(g: GimmickSpec): { x: number; half: number; h: number; depth: number } | null {
+  const p = g.params ?? {};
+  switch (g.kind) {
+    // 문 몸체가 항상 레인 중앙(x=0)에 고정이다 (obstacles.ts park/update)
+    case "coopgate":
+    case "buttongate":
+      return { x: 0, half: OB.gateW / 2, h: OB.gateH, depth: OB.gateD };
+    // 신호 문은 맵이 폭·높이·좌우 위치를 정한다
+    case "holdgate":
+      return { x: g.x ?? 0, half: (p.w ?? OB.gateW) / 2, h: p.h ?? OB.gateH, depth: OB.gateD };
+    // 미는 문은 상자 자체가 마개다. 통로가 상자 폭과 같아야 딱 맞게 막힌다
+    case "pushblock":
+      return { x: g.x ?? 0, half: (p.w ?? OB.pushW) / 2, h: p.h ?? OB.pushH, depth: p.len ?? OB.pushD };
+    default:
+      return null;
+  }
+}
+
 interface Sec extends CourseSection { x: number }
 
 function normSection(s: SectionLike): Sec {
@@ -557,7 +592,37 @@ export function makeCourse(cfg: StageCfg) {
   }
 
   // ---------------------------------------------------------- 고정 벽 (문틀)
-  for (const w of cfg.walls ?? []) {
+  //
+  // [왜 게이트마다 자동으로 세우는가 — 실측으로 드러난 구멍]
+  // 게이트(coopgate/buttongate/holdgate)의 몸체는 폭 5.6m인데 레인은 14m다.
+  // mesh와 collider는 정확히 일치하지만(둘 다 5.6), **좌우에 4.02m씩 빈 바닥이
+  // 남아서 닫힌 문 옆으로 그냥 걸어 지나갈 수 있었다.** 브라우저에서 확인한
+  // 실제 경로: 스테이지 1의 홀드게이트(z=-84)를 x=-5로 지나 z=-108.9까지
+  // 아무 저항 없이 통과했다. 「혼자서는 못 지나간다」가 통째로 거짓이었다.
+  //
+  // 스테이지 파일이 벽을 손으로 적게 하면(스테이지 4의 미는 문이 그랬다)
+  // 게이트를 하나 추가할 때마다 잊어버릴 수 있다 — 실제로 그렇게 잊었다.
+  // 그래서 **게이트를 선언하면 문틀이 따라온다.**
+  //
+  // 문틀은 게이트가 열려도 남는다(정적 바디다). 열리는 것은 가운데 통로뿐이다.
+  const frameWalls: StageWall[] = [];
+  for (const g of cfg.gimmicks ?? []) {
+    const op = gateOpening(g);
+    if (!op) continue;
+    const outer = outerAt(g.z);
+    // 문 높이보다 낮으면 문틀을 넘어갈 수 있다. 점프 최고 높이는 골반 1.66
+    // (평지 0.86에서 +0.80)이라 발이 올라갈 수 있는 턱은 0.8m 남짓이다.
+    // 그보다 한참 높은 FRAME_MIN_H를 바닥으로 두고, 문이 더 높으면 문에 맞춘다.
+    const h = Math.max(op.h, FRAME_MIN_H);
+    for (const side of [-1, 1] as const) {
+      const inner = op.x + side * op.half;              // 통로 가장자리
+      const outerEdge = side * outer;                   // 레인 가장자리
+      const w = Math.abs(outerEdge - inner);
+      if (w < 0.05) continue;                           // 문이 레인을 이미 다 덮는다
+      frameWalls.push({ x: (inner + outerEdge) / 2, z: g.z, w, h, len: op.depth });
+    }
+  }
+  for (const w of [...frameWalls, ...(cfg.walls ?? [])]) {
     const h = w.h ?? 2.6;
     const len = w.len ?? 1.0;
     solid(b, [w.w, h, len], [w.x, h / 2, w.z], w.color ?? GR.fence, [0, 0, 0], { rough: 0.55 });

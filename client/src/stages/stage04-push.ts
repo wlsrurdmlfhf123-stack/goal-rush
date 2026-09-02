@@ -89,14 +89,11 @@ export const STAGE4_PUSH: MapDef = {
     // 프레스(-22·-88) / 발판(-102.4) / 미는 문(-42)에서 6m 이상 띄운다
     hazards: [0, -52, -120],
 
-    // ---- 미는 문의 문틀
-    //
-    // 벽 두 장이 레인(±7)을 막고 가운데 4.4m만 남긴다. 그 구멍에 상자가
-    // 끼어 있으므로 **옆으로 돌아갈 방법이 없다.** 벽은 실제 물리 바디다.
-    walls: [
-      { x: -(DOOR_HALF + (LANE_HALF - DOOR_HALF) / 2), z: PUSH_Z, w: LANE_HALF - DOOR_HALF, h: 2.6, len: 1.0 },
-      { x: +(DOOR_HALF + (LANE_HALF - DOOR_HALF) / 2), z: PUSH_Z, w: LANE_HALF - DOOR_HALF, h: 2.6, len: 1.0 },
-    ],
+    // [문틀은 손으로 안 적는다] 예전에는 여기에 `walls` 두 장을 직접 세웠다.
+    // 그런데 그 방식은 **게이트를 추가할 때마다 잊어버릴 수 있다** — 실제로
+    // 다른 게이트 일곱 개가 전부 문틀 없이 세워져 옆으로 걸어 지나갈 수 있었다.
+    // 지금은 course.ts 가 게이트 선언(coopgate/buttongate/holdgate/pushblock)을
+    // 보고 레인 끝까지 잇는 문틀을 자동으로 세운다.
 
     gimmicks: [
       { kind: "press", z: -22, x: 0, phase: 0.0,

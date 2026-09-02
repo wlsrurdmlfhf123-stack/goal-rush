@@ -55,6 +55,11 @@ interface Rig {
   rags: Ragdoll[];
   physics: CANNON.World;
   addRagdoll(x: number, z: number, y?: number): Ragdoll;
+  /**
+   * **봇**으로 세운다. 몸은 사람과 똑같이 있고 물리도 같지만, 협동 장치의
+   * 판정 목록(humans)에서만 빠진다 — main.ts 가 하는 것과 같다.
+   */
+  addBot(x: number, z: number, y?: number): Ragdoll;
   step(n?: number, input?: StepInput): void;
   /** 지금까지 장애물이 사람을 때린 횟수 (update() 의 hits 를 센 것) */
   hits(): number;
@@ -195,6 +200,8 @@ function build(decls: Decl[], ballAt: [number, number, number] = [0, B.radius + 
 
   const scene = new THREE.Scene();
   const rags: Ragdoll[] = [];
+  /** 이 중 봇인 래그돌 (협동 장치 판정에서 빠진다) */
+  const botRags = new Set<Ragdoll>();
   /** y 를 주면 그 높이에 세운다 (발판 위에 올려놓을 때 = 발판 윗면 + rideHeight) */
   const addRagdoll = (x: number, z: number, y = P.rideHeight) => {
     const r = createRagdoll(
@@ -226,12 +233,19 @@ function build(decls: Decl[], ballAt: [number, number, number] = [0, B.radius + 
   let hitCount = 0;
   const step = (n = 1, input: StepInput = { moveX: 0, moveZ: 0, jump: false }) => {
     for (let i = 0; i < n; i++) {
-      hitCount += obstacles.update(dt, rags, ball).length;
+      // main.ts 와 같은 방식으로 넘긴다: 몸은 전부, 협동 판정은 사람만.
+      const humans = botRags.size ? rags.filter((r) => !botRags.has(r)) : rags;
+      hitCount += obstacles.update(dt, rags, ball, humans).length;
       rags.forEach((rag, k) => rag.control(dt, typeof input === "function" ? input(k) : input, physics));
       physics.step(dt);
     }
   };
-  return { ball, obstacles, rags, addRagdoll, step, physics, hits: () => hitCount };
+  const addBot = (x: number, z: number, y = P.rideHeight) => {
+    const r = addRagdoll(x, z, y);
+    botRags.add(r);
+    return r;
+  };
+  return { ball, obstacles, rags, addRagdoll, addBot, step, physics, hits: () => hitCount };
 }
 
 // ---------------------------------------------------------------- 1. 플랫폼
@@ -860,6 +874,101 @@ console.log("\n--- TEST 13: 바람이 켜졌다 꺼진다 (period / onFrac) ---"
   r2.step(60);
   check("꺼져 있는 동안에는 공이 안 밀린다", Math.abs(r2.ball.position.x - x0) < 0.2,
     `dx=${(r2.ball.position.x - x0).toFixed(3)}`);
+}
+
+// ------------------------------------------- 14. 봇은 협동 장치를 못 건드린다
+//
+// [무엇이 잘못돼 있었나 — 실측] main.ts 는 봇을 사람과 같은 playersById 에
+// 넣고 그 목록을 통째로 obstacles.update() 에 넘겼다. 그래서 봇이
+//   · 레버를 밟으면 신호가 켜지고
+//   · 버튼 문 발판 위에 서면 문이 열리고
+//   · 문을 그냥 지나가면 forceOpen 이 걸려 그 판 내내 열린 채로 남고
+//   · 미는 문에 붙어 걸으면 사람 한 명 몫의 힘을 보탰다.
+// 스테이지 2 의 첫 버튼 문(z=-20)은 방해꾼 봇이 지나가는 것만으로 영구
+// 개방됐다 — 「한 명이 눌러주고 다른 한 명이 지나간다」가 통째로 사라진다.
+//
+// 고친 방식은 규칙 변경이 **아니다**. update() 에 사람 목록을 따로 넘겨서
+// 협동 판정만 그쪽을 보게 했다. 몸(피격/발판 승객/빙판/범퍼)은 그대로 전부다.
+console.log("\n--- TEST 14: 봇은 협동 장치의 「사람」이 아니다 ---");
+{
+  // 레버 — 봇이 밟아도 신호가 안 켜진다
+  const r = build([{ kind: "lever", z: 0, x: 0, link: 7, params: { hold: 1, w: 2.6, len: 2.6 } }]);
+  r.addBot(0, 0);
+  r.step(90);
+  check("봇이 레버를 밟아도 신호가 꺼져 있다", r.obstacles.signalActive(7) === false);
+  r.addRagdoll(0.9, 0);
+  r.step(90);
+  check("같은 자리에 사람이 서면 켜진다", r.obstacles.signalActive(7) === true);
+}
+{
+  // 버튼 문 — 봇이 발판에 서 있어도 안 열린다 (스테이지 2 첫 문의 구조)
+  const r = build([{ kind: "buttongate", z: 0 }]);
+  const gate = r.obstacles.stations[0].body;
+  r.addBot(OB.btnPadX, OB.btnPadAhead);
+  r.step(150);
+  check("봇이 발판에 서 있어도 문이 닫혀 있다", gate.position.y > 0.5, `y=${gate.position.y.toFixed(2)}`);
+  r.addRagdoll(-OB.btnPadX, OB.btnPadAhead);
+  r.step(150);
+  check("사람이 발판에 서면 열린다", gate.position.y < -0.5, `y=${gate.position.y.toFixed(2)}`);
+}
+{
+  // 「지나갔음」 잠금 — 봇이 문을 넘어간 것은 세지 않는다.
+  //
+  // 사람이 발판을 밟아 연 사이에 봇은 이미 문 너머에 있다. 사람이 발판에서
+  // 내려왔을 때 문이 다시 닫혀야 한다 - 열린 채로 남으면 봇이 forceOpen 을
+  // 걸었다는 뜻이고, 그게 스테이지 2 에서 실제로 일어난 일이다.
+  const r = build([{ kind: "buttongate", z: 0 }]);
+  const gate = r.obstacles.stations[0].body;
+  const bot = r.addBot(0, -6);                                  // 이미 문 너머
+  const human = r.addRagdoll(OB.btnPadX, OB.btnPadAhead);
+  r.step(150);
+  check("사람이 밟아서 열려 있다", gate.position.y < -0.5, `y=${gate.position.y.toFixed(2)}`);
+  check("봇은 문 너머에 있다", bot.pelvis.position.z < -OB.gateD,
+    `z=${bot.pelvis.position.z.toFixed(2)}`);
+  human.reset(new CANNON.Vec3(OB.btnPadX, P.rideHeight, 12));   // 발판에서 내려온다
+  r.step(180);
+  check("봇이 지나간 것으로는 문이 잠기지 않는다 (다시 닫힌다)",
+    gate.position.y > 0.5, `y=${gate.position.y.toFixed(2)}`);
+}
+{
+  // 반대로 **사람**이 지나간 뒤에는 예전 그대로 계속 열려 있다 (규칙은 그대로)
+  const r = build([{ kind: "buttongate", z: 0 }]);
+  const gate = r.obstacles.stations[0].body;
+  const walker = r.addRagdoll(0, -6);                           // 이미 문 너머
+  const human = r.addRagdoll(OB.btnPadX, OB.btnPadAhead);
+  r.step(150);
+  human.reset(new CANNON.Vec3(OB.btnPadX, P.rideHeight, 12));
+  r.step(180);
+  check("사람이 지나간 뒤에는 계속 열려 있다", gate.position.y < -0.5,
+    `y=${gate.position.y.toFixed(2)} 지나간 사람 z=${walker.pelvis.position.z.toFixed(1)}`);
+}
+{
+  // 미는 문 — 봇은 힘을 보태지 않는다 (사람 하나 + 봇 하나 = 여전히 한 명 몫)
+  const decl: Decl[] = [{ kind: "pushblock", z: 0, x: 0, params: { axis: 1, span: 4, w: 4.4, h: 2.2, len: 1.4 } }];
+  const push = (humans: number, bots: number) => {
+    const r = build(decl);
+    const n = humans + bots;
+    let k = 0;
+    for (let i = 0; i < humans; i++) r.addRagdoll((k++ - (n - 1) / 2) * 1.2, 1.35);
+    for (let i = 0; i < bots; i++) r.addBot((k++ - (n - 1) / 2) * 1.2, 1.35);
+    r.step(30);
+    const before = r.obstacles.stations[0].body.position.z;
+    r.step(180, { moveX: 0, moveZ: -1, jump: false });
+    return before - r.obstacles.stations[0].body.position.z;
+  };
+  const withBot = push(1, 1);
+  const twoHumans = push(2, 0);
+  console.log(`       사람1+봇1 ${withBot.toFixed(2)}m / 사람2 ${twoHumans.toFixed(2)}m (3초)`);
+  check("사람 하나 + 봇 하나로는 안 밀린다", withBot < 0.05, `moved=${withBot.toFixed(3)}`);
+  check("사람 둘이면 밀린다 (규칙은 그대로)", twoHumans > 1.0, `moved=${twoHumans.toFixed(3)}`);
+}
+{
+  // 그래도 봇은 **맞아야** 한다 — 협동 판정에서만 뺐지 몸을 뺀 게 아니다
+  const r = build([{ kind: "press", z: 0, x: 0,
+    params: { w: 5, len: 3, period: 3.6, downFrac: 0.3, speed: 6, topY: 4.2, bottomY: 0.25 } }]);
+  r.addBot(0, 0);
+  r.step(60 * 5);
+  check("봇도 프레스에 맞는다 (몸은 그대로 센다)", r.hits() > 0, `hits=${r.hits()}`);
 }
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);
